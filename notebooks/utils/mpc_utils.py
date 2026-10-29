@@ -187,7 +187,8 @@ def compute_new_pose(pose, action):
     new_closedness = np.clip(new_closedness, 0, 1)
     # -- new pose
     new_pose = np.concatenate([new_xyz, new_angle, new_closedness], axis=-1)
-    return torch.from_numpy(new_pose).to(device).to(dtype)[:, None]
+    # cast before moving: MPS has no float64, and numpy gave us float64
+    return torch.from_numpy(new_pose).to(dtype).to(device)[:, None]
 
 
 def poses_to_diff(start, end):

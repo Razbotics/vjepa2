@@ -54,6 +54,14 @@ torch.backends.cudnn.benchmark = True
 logger = get_logger(__name__, force=True)
 
 
+def _peak_mem_mb(device):
+    if device.type == "cuda":
+        return torch.cuda.max_memory_allocated() / 1024.0**2
+    if device.type == "mps":
+        return torch.mps.driver_allocated_memory() / 1024.0**2
+    return 0.0
+
+
 def main(args, resume_preempt=False):
     # ----------------------------------------------------------------------- #
     #  PASSED IN PARAMS FROM CONFIG FILE
@@ -114,14 +122,22 @@ def main(args, resume_preempt=False):
     normalize_predictor = cfgs_model.get("normalize_predictor", False)
     modality_embedding = cfgs_model.get("modality_embedding", False)
     levels_predictor = cfgs_model.get("levels_predictor", 4)
-    if model_name == "vit_large":
-        embed_dim_encoder = 1024
-    elif model_name == "vit_giant_xformers":
-        embed_dim_encoder = 1408
-    elif model_name == "vit_gigantic_xformers":
-        embed_dim_encoder = 1664
-    else:
-        print("Model name not recognized :(")
+    embed_dim_encoder = {
+        "vit_tiny": 192,
+        "vit_small": 384,
+        "vit_base": 768,
+        "vit_large": 1024,
+        "vit_large_rope": 1024,
+        "vit_huge": 1280,
+        "vit_giant": 1408,
+        "vit_giant_rope": 1408,
+        "vit_giant_xformers": 1408,
+        "vit_giant_xformers_rope": 1408,
+        "vit_gigantic": 1664,
+        "vit_gigantic_xformers": 1664,
+    }.get(model_name)
+    if embed_dim_encoder is None:
+        raise ValueError(f"Model name not recognized: {model_name}")
 
     # -- DATA
     cfgs_data = args.get("data")
@@ -288,12 +304,15 @@ def main(args, resume_preempt=False):
     else:
         lambda_value = lambda_value_vid
 
-    # -- set device
-    if not torch.cuda.is_available():
-        device = torch.device("cpu")
-    else:
+    # -- set device (CUDA > Apple MPS > CPU)
+    if torch.cuda.is_available():
         device = torch.device("cuda:0")
         torch.cuda.set_device(device)
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+    logger.info(f"Using device {device}")
 
     # -- log/checkpointing paths
     log_file = os.path.join(folder, f"log_r{rank}.csv")
@@ -436,11 +455,14 @@ def main(args, resume_preempt=False):
         betas=betas,
         eps=eps,
     )
-    encoder = DistributedDataParallel(encoder, static_graph=True)
-    predictor = DistributedDataParallel(
-        predictor, static_graph=False, find_unused_parameters=True
-    )
-    target_encoder = DistributedDataParallel(target_encoder)
+    if world_size > 1:
+        encoder = DistributedDataParallel(encoder, static_graph=True)
+        predictor = DistributedDataParallel(
+            predictor, static_graph=False, find_unused_parameters=True
+        )
+        target_encoder = DistributedDataParallel(target_encoder)
+    else:
+        logger.info("Single process: skipping DistributedDataParallel wrapping")
     for p in target_encoder.parameters():
         p.requires_grad = False
 
@@ -675,7 +697,7 @@ def main(args, resume_preempt=False):
                             return loss
 
                 # Step 1. Forward
-                with torch.cuda.amp.autocast(dtype=dtype, enabled=mixed_precision):
+                with torch.autocast(device_type=device.type, dtype=dtype, enabled=mixed_precision):
                     h = forward_target(clips)
                     z_pred, z_context = forward_context(clips)
                     loss = 0
@@ -815,7 +837,7 @@ def main(args, resume_preempt=False):
                             + "]",
                             _new_wd,
                             _new_lr,
-                            torch.cuda.max_memory_allocated() / 1024.0**2,
+                            _peak_mem_mb(device),
                             iter_time_meter.avg,
                             gpu_time_meter.avg,
                             data_elapsed_time_meter.avg,

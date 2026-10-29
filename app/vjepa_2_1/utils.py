@@ -364,5 +364,6 @@ def init_opt(
         T_max=int(ipe_scale * num_epochs * iterations_per_epoch),
     )
 
-    scaler = torch.cuda.amp.GradScaler() if mixed_precision else None
+    # GradScaler only matters for float16 on CUDA; on MPS/CPU (or bf16) it runs disabled as a pass-through.
+    scaler = torch.amp.GradScaler("cuda", enabled=torch.cuda.is_available()) if mixed_precision else None
     return optimizer, scaler, scheduler, wd_scheduler

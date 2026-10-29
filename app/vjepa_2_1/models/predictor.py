@@ -74,6 +74,9 @@ class VisionTransformerPredictor(nn.Module):
             all_hierarchical_layers = [4, 11, 17, 23]
         elif depth == 40:
             all_hierarchical_layers = [9, 19, 29, 39]
+        else:
+            # Any other depth: four evenly spaced taps ending at the last block.
+            all_hierarchical_layers = [round((i + 1) * depth / 4) - 1 for i in range(4)]
 
         n_output_distillation = kwargs.get("n_output_distillation", len(all_hierarchical_layers))
         self.hierarchical_layers = all_hierarchical_layers[-n_output_distillation:]
