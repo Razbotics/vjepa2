@@ -204,6 +204,98 @@ Config notes for laptop runs:
 - V-JEPA 2-AC and the `app/vjepa_droid` trainer have not been patched yet; the same
   four CUDA assumptions will apply there.
 
+## Remote GPU desktop (`aorus`)
+
+The CUDA box is the `aorus` entry in `~/.ssh/config` (AORUS-PRO, Ubuntu 22.04,
+RTX 4060 Ti 16 GB, 12 cores, 31 GB RAM, 192.168.29.2 on the home LAN; driver
+580.196.07, CUDA 13.0). Key auth with
+`~/.ssh/id_ed25519`; the repo lives at `~/projects/vjepa2` there with its own `.venv`
+and `checkpoints/`.
+
+```bash
+local/remote/run_on_aorus.sh                       # rsync, then an interactive shell in the repo
+local/remote/run_on_aorus.sh nvidia-smi
+local/remote/run_on_aorus.sh python -m pytest tests -q
+local/remote/run_on_aorus.sh python -m local.smoke_inference --model vjepa2_1_vit_large_384 --frames 64 --size 384
+local/remote/run_on_aorus.sh python -m app.main --fname local/configs/vits_mac_smoke.yaml --devices cuda:0
+```
+
+The helper rsyncs this checkout (minus `.venv`, `checkpoints/`, `local/runs`,
+`local/data`) and runs the command inside the remote venv with output streaming back.
+`NO_SYNC=1` skips the sync; `REMOTE=` / `REMOTE_DIR=` retarget it. Edit on the Mac, run
+on the desktop; results stay in `~/projects/vjepa2/local/runs` there.
+
+Setup notes, in the order they bit:
+- **Secure Boot.** Ubuntu's DKMS-built NVIDIA modules are signed with a per-machine
+  Machine Owner Key (`/var/lib/shim-signed/mok/MOK.der`). Until that key is enrolled in
+  firmware the kernel logs "Loading of module with unavailable key is rejected" and
+  `nvidia-smi` cannot find the driver. Fix: `sudo update-secureboot-policy --enroll-key`
+  (or `sudo mokutil --import /var/lib/shim-signed/mok/MOK.der`), set a one-time
+  password, reboot, and at the blue MOK Manager screen choose Enroll MOK, Continue
+  ("View key 0" only shows the cert), Yes, type the password, Reboot. Needs a keyboard
+  and monitor on the box that one time. The screen times out in ~10 s and boots normally;
+  the request stays queued (`MokNew` in `/sys/firmware/efi/efivars`) until the next boot.
+  Check with `mokutil --list-enrolled | grep AORUS`.
+- **Driver.** Upgraded from 560-open to `nvidia-driver-580-open` (NVIDIA CUDA apt repo).
+  580 is the production branch and the minimum for the CUDA 13 runtime bundled in
+  PyPI's default `torch` wheel (`torch==2.15.0` pulls `nvidia-cuda-runtime==13.2`).
+  With the old 560 driver only the `cu126` index (`torch 2.14.1+cu126`) would have worked.
+- **Headless + no sleep.** `sudo bash local/remote/ubuntu_headless_nosleep.sh` masks the
+  systemd sleep targets, sets `IdleAction=ignore` for logind, and disables suspend and
+  blanking for both the GDM login screen and the user's GNOME session (via the user's
+  session bus at `/run/user/<uid>/bus`; `dbus-launch` is not installed there). Run it
+  *before* any long install: the box suspended itself on GNOME's 20-minute idle timer in
+  the middle of the driver install, which killed the SSH session and the MOK dialog with
+  it. In the BIOS also enable "power on after AC loss". The box does not need a monitor
+  for CUDA work.
+- **Network.** The desktop is on Wi-Fi via a USB dongle (~5 MB/s). The onboard
+  `eno1` port has no cable. Plug one in: the 17 GB of checkpoints and the CUDA torch
+  wheels (~3 GB) are painful over Wi-Fi, and the laptop talks to it over the same link.
+- Working away from home later: install Tailscale on both machines and point the
+  `aorus` HostName at its tailnet name; nothing else changes.
+
+### GPU numbers (RTX 4060 Ti 16 GB, torch 2.15.0+cu132)
+
+Same scripts, same configs, run through `run_on_aorus.sh` on 2026-11-04. Encoder only,
+bf16 autocast, batch 1, after warm-up:
+
+| Model | Frames x px | Tokens | Mac M5 Pro (MPS) | aorus (CUDA) | Speed-up |
+|---|---|---|---|---|---|
+| 2.1 ViT-B | 16 x 256 | 2 048 | 54 ms, 0.6 GB | 26 ms, 0.5 GB | 2.1x |
+| 2.1 ViT-B | 64 x 256 | 8 192 | 270 ms, 1.5 GB | 140 ms, 0.7 GB | 1.9x |
+| 2.1 ViT-B | 64 x 384 (native) | 18 432 | 1.1 s, 2.5 GB | 480 ms, 1.1 GB | 2.3x |
+| 2.1 ViT-L | 16 x 256 | 2 048 | 146 ms, 2.1 GB | 73 ms, 1.3 GB | 2.0x |
+| 2.1 ViT-L | 64 x 256 | 8 192 | 764 ms, 2.1 GB | 385 ms, 1.6 GB | 2.0x |
+| 2.1 ViT-L | 64 x 384 (native) | 18 432 | 2.7 s, 3.1 GB | 1.32 s, 2.1 GB | 2.0x |
+
+V-JEPA 2-AC planning (`local/smoke_ac_planning.py`, real weights, bf16):
+
+| Stage | Mac M5 Pro (MPS) | aorus (CUDA) |
+|---|---|---|
+| Load encoder + predictor from the 11 GB checkpoint | 13 s | 15 s (over Wi-Fi-copied file, NVMe) |
+| Encode 2 frames | 108 ms | 78 ms |
+| Energy grid, 125 actions, 1 predictor step | 1.7 s | 1.04 s |
+| CEM plan, rollout 2, 25 samples, 2 steps | 2.0 s | 1.2 s |
+| Peak device memory | 8.1 GB | 6.0 GB |
+
+Same sanity check on both machines: grid argmin at (+0.075, +0.075, +0.075) with energy
+0.413 vs max 0.486, CEM first steps (+0.062, +0.046, +0.043) and (+0.030, +0.053, +0.055)
+against ground truth (+0.092, +0.031, +0.084).
+
+Other runs: `pytest tests` 26 passed in 53 s (the Mac skips the 3 CUDA-only tests);
+`vits_mac_smoke.yaml --devices cuda:0` reaches the same loss (0.855 -> 0.822) with the
+`gpu` column at 340-640 ms and 2.3 GB, but the `data` column at ~1 s, so this config is
+data-bound on both machines. Raise `num_workers` and batch size before reading anything
+into GPU step time. The Mac `mem` column is driver-allocated memory while the CUDA one is
+`torch.cuda.max_memory_allocated`, so those two are not the same quantity.
+
+A 4060 Ti is only ~2x the M5 Pro on these encoders: both are memory-bandwidth-bound at
+batch 1 and the GPU is not fed. The gap widens with work per call: a CEM plan at
+200 samples x 5 steps x rollout 2 takes 25 s per action on aorus at 9.9 GB peak (and
+lands exactly on the +0.075 corner), a setting the laptop cannot hold in memory. That is
+still ~25x off real time for the paper's 400 x 10 planner, so predictor batching and a
+smaller predictor are the Phase-2 levers, not a bigger GPU.
+
 ## Suggested next steps for the drone world-model plan
 
 1. Wire `load_model("vjepa2_ac_vit_giant")` into an image-goal MPC loop (the energy
