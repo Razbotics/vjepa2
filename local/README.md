@@ -220,10 +220,18 @@ local/remote/run_on_aorus.sh python -m local.smoke_inference --model vjepa2_1_vi
 local/remote/run_on_aorus.sh python -m app.main --fname local/configs/vits_mac_smoke.yaml --devices cuda:0
 ```
 
-The helper rsyncs this checkout (minus `.venv`, `checkpoints/`, `local/runs`,
-`local/data`) and runs the command inside the remote venv with output streaming back.
-`NO_SYNC=1` skips the sync; `REMOTE=` / `REMOTE_DIR=` retarget it. Edit on the Mac, run
-on the desktop; results stay in `~/projects/vjepa2/local/runs` there.
+Code moves through git. `origin` is the fork `github.com/Razbotics/vjepa2` on both
+machines and `upstream` is `facebookresearch/vjepa2`; `mac-dev` tracks `origin/mac-dev`,
+`main` tracks `upstream/main` (so `git pull` on `main` brings in Meta's changes, then
+`git merge main` on `mac-dev`). The helper pushes the current branch to the fork, then
+on the desktop fetches and hard-resets that branch to `origin/<branch>`, and runs the
+command inside the remote venv with output streaming back. Only committed work travels;
+it warns when the tree is dirty. `SYNC=rsync` copies the working tree instead
+(uncommitted edits included, minus `.venv`, `checkpoints/`, `local/runs`, `local/data`)
+for quick experiments; `NO_SYNC=1` skips syncing; `REMOTE=` / `REMOTE_DIR=` retarget it.
+Edit and commit on the Mac, run on the desktop; results stay in
+`~/projects/vjepa2/local/runs` there. The desktop pulls the public fork over HTTPS, so
+it needs no GitHub credentials; pushing is only ever done from the Mac.
 
 Setup notes, in the order they bit:
 - **Secure Boot.** Ubuntu's DKMS-built NVIDIA modules are signed with a per-machine
