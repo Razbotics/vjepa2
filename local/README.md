@@ -488,6 +488,45 @@ First 30 s run at the ready pose, four joints moving +/-10 deg, 640x360:
   line of sight and are mostly hidden. First clean side-view run: `local/data/arm/20261124_011609` on aorus
   (3,601 samples, 128 MB, nobody in view, gripper inside the square at every extreme).
 
+### Do the encoder features carry the arm's joint state?
+
+`local/arm_encode.py` encodes every frame of a run with frozen encoders (single frame, centre crop, 256 px)
+and fits a ridge regression from features to the measured angle of each joint that moved. Evaluation is
+blocked 5-fold cross-validation in time with a 1 s gap, so neighbouring frames never straddle the split.
+
+```bash
+local/remote/run_on_aorus.sh python -m local.arm_encode local/data/arm/20261124_011609
+```
+
+Run `20261124_011609` (side view, 3,601 frames, four joints moving +/-10 deg). R2 / mean absolute error in
+degrees on held-out time; "pooled" is the mean over tokens, "grid" keeps a 4x4 spatial layout:
+
+| Features | Encode speed | elbow_flex | wrist_flex | wrist_roll | gripper |
+|---|---|---|---|---|---|
+| joint range in the run | | 15.9 deg | 17.8 deg | 19.3 deg | 9.8 deg |
+| training mean | | 0.00 / 3.46 | 0.00 / 4.14 | 0.00 / 4.54 | 0.00 / 2.07 |
+| raw 32x32 grey pixels | | 1.00 / 0.21 | 0.98 / 0.44 | 0.85 / 1.38 | 0.09 / 1.75 |
+| 2.1 ViT-B pooled | 237 fps | 0.98 / 0.40 | 0.96 / 0.73 | 0.86 / 1.44 | 0.59 / 1.23 |
+| 2.1 ViT-B grid | | 0.99 / 0.23 | 0.98 / 0.42 | 0.94 / 0.90 | 0.77 / 0.89 |
+| 2.1 ViT-L pooled | 112 fps | 0.99 / 0.33 | 0.97 / 0.64 | 0.92 / 1.14 | 0.66 / 1.09 |
+| 2.1 ViT-L grid | | 0.99 / 0.22 | 0.99 / 0.37 | 0.95 / 0.86 | 0.81 / 0.82 |
+| 2-AC ViT-g pooled | 44 fps | 0.98 / 0.39 | 0.95 / 0.77 | 0.86 / 1.49 | 0.40 / 1.49 |
+| 2-AC ViT-g grid | | 0.99 / 0.28 | 0.97 / 0.56 | 0.91 / 1.21 | 0.57 / 1.26 |
+
+Reading it:
+
+- The joint state is linearly readable from the features: elbow and wrist flex to well under a degree.
+- Raw pixels do just as well on elbow and wrist flex. With a fixed camera and background those two joints
+  move large dark shapes, so this run cannot show an advantage for the encoder there.
+- The encoders pull ahead on the subtle joints: gripper opening goes from R2 0.09 (pixels) to 0.81 (ViT-L
+  grid), wrist roll from 0.85 to 0.95.
+- Keeping spatial layout beats mean pooling for every model and joint. A predictor should work on patch
+  tokens or a pooled grid, not one pooled vector.
+- ViT-L is best, ViT-B is close behind at twice the speed, and the 1B-parameter 2-AC ViT-g encoder is the
+  weakest of the three here, clearly so on the gripper.
+- Limits: one scene, one session, one lighting. This says the state is present, not that it survives a
+  change of background or light. That needs a second run under different conditions as the test set.
+
 ## Suggested next steps for the drone world-model plan
 
 1. Wire `load_model("vjepa2_ac_vit_giant")` into an image-goal MPC loop (the energy
