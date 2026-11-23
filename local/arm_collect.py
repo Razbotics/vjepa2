@@ -40,6 +40,15 @@ import numpy as np
 from local.camera import Camera, set_v4l2_controls
 
 DEFAULT_PORT = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B91028149-if00"
+# Ready poses: where the arm must be resting when the run starts, then the commanded targets (raw ticks)
+# applied one joint at a time in this order. Leaving replays them in reverse. "table" lifts the gripper
+# clear with the elbow first, then levels it with the wrist; found by stepping the arm in view of the camera.
+READY_POSES = {
+    "table": {
+        "rest": {"shoulder_pan": 2051, "shoulder_lift": 1789, "elbow_flex": 3066, "wrist_flex": 1097},
+        "stages": [("elbow_flex", 2782), ("wrist_flex", 1438)],
+    }
+}
 TICKS_PER_DEG = 4096 / 360.0
 
 
@@ -85,6 +94,8 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--seconds", type=float, default=20.0)
     ap.add_argument("--joints", nargs="+", default=["wrist_roll", "gripper"], help="joints allowed to move")
+    ap.add_argument("--ready", choices=sorted(READY_POSES), default=None, help="move to this pose first")
+    ap.add_argument("--rest-tol", type=int, default=60, help="ticks the start pose may differ from the rest pose")
     ap.add_argument("--max-deg", type=float, default=10.0, help="how far a joint may wander from its start pose")
     ap.add_argument("--step-deg", type=float, default=6.0, help="largest change between consecutive targets")
     ap.add_argument("--margin-deg", type=float, default=3.0, help="keep this far inside the calibrated limits")
@@ -92,6 +103,7 @@ def main():
     ap.add_argument("--accel", type=int, default=10, help="servo acceleration, units of 100 ticks/s^2")
     ap.add_argument("--dwell", type=float, default=0.3, help="seconds to rest at each target")
     ap.add_argument("--tol", type=int, default=12, help="ticks from goal that count as arrived")
+    ap.add_argument("--sag-tol", type=int, default=45, help="also arrived if stopped within this many ticks")
     ap.add_argument("--stall-s", type=float, default=2.0)
     ap.add_argument("--max-load", type=int, default=700, help="abort above this servo load (0-1000)")
     ap.add_argument("--max-temp", type=int, default=60)
@@ -132,6 +144,22 @@ def main():
     def write_goal(goal):
         bus.sync_write("Goal_Position", {n: int(g) for n, g in zip(names, goal)}, normalize=False)
 
+    def move_and_wait(goal, label, timeout=8.0):
+        """Command a goal and wait until the arm stops. Raises if it stops far away or a load is too high."""
+        write_goal(goal)
+        t0, last, still = time.perf_counter(), read("Present_Position"), 0
+        while time.perf_counter() - t0 < timeout and still < 4:
+            time.sleep(0.1)
+            pos, load = read("Present_Position"), read("Present_Load")
+            if np.abs(load).max() > args.max_load:
+                raise RuntimeError(f"{label}: load {load.tolist()} above {args.max_load}")
+            still = still + 1 if np.abs(pos - last).max() <= 1 else 0
+            last = pos
+        err = np.abs(last - goal).max()
+        if err > args.sag_tol:
+            raise RuntimeError(f"{label}: stopped {err:.0f} ticks from goal (blocked?)")
+        print(f"{label:<22} pos={last.tolist()}")
+
     cam = writer = None
     if not args.no_camera:
         controls = {"exposure_dynamic_framerate": 0, "power_line_frequency": 1 if args.mains_hz == 50 else 2}
@@ -151,7 +179,7 @@ def main():
 
     bus.connect()  # handshake only; SO101Follower.connect() would also rewrite PID gains
     log = {k: [] for k in ("t_frame", "t_joint", "pos_raw", "goal_raw", "load", "target_id")}
-    stop_reason, torque_on = "completed", False
+    stop_reason, torque_on, path = "completed", False, []
     try:
         mode = read("Operating_Mode")
         if mode.any():
@@ -159,14 +187,22 @@ def main():
         start = read("Present_Position")
         # Joints resting on a hard stop sit slightly outside the calibrated range; never command past it.
         hold = np.clip(start, [c.range_min for c in calib], [c.range_max for c in calib])
-        centre = np.clip(start, lo, hi)
+        ready = hold.copy()
+        if args.ready:
+            pose = READY_POSES[args.ready]
+            off = {j: int(start[names.index(j)] - v) for j, v in pose["rest"].items()}
+            if max(abs(v) for v in off.values()) > args.rest_tol:
+                raise RuntimeError(f"arm is not in the '{args.ready}' rest pose, offsets {off}")
+            for j, v in pose["stages"]:
+                ready[names.index(j)] = v
+        centre = np.clip(ready, lo, hi)
         span = args.max_deg * TICKS_PER_DEG
         box_lo, box_hi = np.maximum(lo, centre - span), np.minimum(hi, centre + span)
         print("joints      ", names)
         print("start (raw) ", start.tolist())
         print("moving      ", [n for n, m in zip(names, moving) if m])
-        print("box lo      ", np.where(moving, box_lo, hold).astype(int).tolist())
-        print("box hi      ", np.where(moving, box_hi, hold).astype(int).tolist())
+        print("box lo      ", np.where(moving, box_lo, ready).astype(int).tolist())
+        print("box hi      ", np.where(moving, box_hi, ready).astype(int).tolist())
 
         for n in names:
             bus.write("Acceleration", n, args.accel, normalize=False)
@@ -178,16 +214,22 @@ def main():
             time.sleep(0.1)
         torque_on = True
         time.sleep(0.5)
+        if args.ready:
+            goal = hold.copy()
+            for j, v in READY_POSES[args.ready]["stages"]:
+                path.append(goal.copy())
+                goal[names.index(j)] = v
+                move_and_wait(goal, f"to ready: {j}")
 
         def new_target(prev):
             step = args.step_deg * TICKS_PER_DEG
             t = rng.uniform(np.maximum(box_lo, prev - step), np.minimum(box_hi, prev + step))
-            return np.where(moving, np.round(t), hold)
+            return np.where(moving, np.round(t), ready)
 
         target_id, arrived_at = 0, None
-        goal = new_target(goal)
+        goal = new_target(ready.copy())
         write_goal(goal)
-        best_err, best_t = np.inf, time.perf_counter()
+        last_pos, moved_t = read("Present_Position"), time.perf_counter()
         t_start = t_report = t_temp = time.perf_counter()
         last_frame_t, i = None, 0
         period = 1.0 / args.rate
@@ -215,15 +257,19 @@ def main():
             err = np.abs(pos - goal)[moving].max()
             if np.abs(load).max() > args.max_load:
                 raise RuntimeError(f"load {dict(zip(names, load.tolist()))} above {args.max_load}")
-            if err < best_err - 3:
-                best_err, best_t = err, now
-            if err <= args.tol:
+            if np.abs(pos - last_pos).max() > 1:
+                moved_t = now
+            last_pos = pos
+            # A joint lifting against gravity stops ~25 ticks short (P-only servo), so "stopped near the goal"
+            # counts as arrived; "stopped far from the goal" is a stall.
+            stopped = now - moved_t
+            if err <= args.tol or (stopped > 0.25 and err <= args.sag_tol):
                 arrived_at = arrived_at or now
                 if now - arrived_at >= args.dwell:
                     goal, target_id, arrived_at = new_target(goal), target_id + 1, None
                     write_goal(goal)
-                    best_err, best_t = np.inf, now
-            elif now - best_t > args.stall_s:
+                    moved_t = now
+            elif stopped > args.stall_s:
                 raise RuntimeError(f"stalled {err:.0f} ticks from goal: {dict(zip(names, (pos - goal).tolist()))}")
 
             if now - t_temp > 2.0:
@@ -244,10 +290,15 @@ def main():
     finally:
         try:
             if torque_on:
-                write_goal(hold)
-                t0 = time.perf_counter()
-                while time.perf_counter() - t0 < 6 and np.abs(read("Present_Position") - hold).max() > args.tol:
-                    time.sleep(0.05)
+                # Back to the ready pose, then undo the approach one joint at a time, in reverse order.
+                for k, g in enumerate([ready] + path[::-1] if path else [hold]):
+                    write_goal(g)
+                    t0, prev, still = time.perf_counter(), read("Present_Position"), 0
+                    while time.perf_counter() - t0 < 8 and still < 4:
+                        time.sleep(0.1)
+                        cur = read("Present_Position")
+                        still = still + 1 if np.abs(cur - prev).max() <= 1 else 0
+                        prev = cur
                 end = read("Present_Position")
                 print("return error (ticks)", (end - start).tolist(), "| temps", read("Present_Temperature").tolist())
         finally:
@@ -268,6 +319,8 @@ def main():
         "moving": args.joints,
         "calibration": {n: vars(c) for n, c in zip(names, calib)},
         "start_raw": start.tolist() if n else None,
+        "ready": args.ready,
+        "ready_raw": ready.tolist() if n else None,
         "stop_reason": stop_reason,
         "samples": n,
         "frames_dropped_by_writer": writer.dropped if writer else None,

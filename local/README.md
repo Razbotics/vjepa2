@@ -435,8 +435,42 @@ Things to know:
   same view scaled down; the 4:3 modes (640x480) crop the left and right edges, and 1280x960 silently falls
   back to 1280x720. `preprocess` then centre-crops a square, so the encoder only sees the middle 56% of the
   width.
-- Only `wrist_roll` and `gripper` have been moved so far. The gravity-loaded joints need a ready pose chosen
-  with the camera watching the arm before `--joints` is widened.
+#### Ready pose and the side camera
+
+`--ready table` first moves the arm from its rest pose to a ready pose (elbow, then wrist, one joint at a
+time), random-walks around that pose, and leaves by the same path in reverse:
+
+```bash
+local/remote/run_on_aorus.sh '~/projects/lerobot/.venv/bin/python' -m local.arm_collect \
+    --ready table --joints elbow_flex wrist_flex wrist_roll gripper --seconds 30
+```
+
+The pose (raw ticks: elbow 2782, wrist flex 1438, others as at rest) holds the gripper level about 12 cm
+above the board. It was chosen by stepping the arm with the camera watching from the side. The run refuses
+to start unless the arm rests within `--rest-tol` ticks of the rest pose stored in `READY_POSES`, because
+the approach path is only known to be clear from there.
+
+First 30 s run at the ready pose, four joints moving +/-10 deg, 640x360:
+
+| | |
+|---|---|
+| Samples | 901 at 30.0 Hz, 901 frames on disk, none dropped |
+| Targets visited | 34 |
+| Settled error, elbow | mean +13 ticks, max 27 (2.4 deg), always short on the way up |
+| Settled error, wrist flex | mean 6 ticks, max 12 |
+| Settled error, wrist roll and gripper | mean 3 to 4 ticks, max 6 |
+| Peak load | 160 of 1000 (elbow) |
+| Size | 31 MB |
+
+- Camera placement: look across the arm from the side, 60 to 80 cm away. Views from above or behind lose
+  the gripper as soon as it lifts, because it moves toward the lens and out of the top of the frame.
+- Direction of travel: decreasing `elbow_flex` raises the gripper, increasing `wrist_flex` lowers it.
+  Elbow -35 deg from rest is the top of the frame in the side view; shoulder moves have not been used in
+  collection yet.
+- Sag is direction dependent: lifting against gravity the elbow stops about 23 ticks short, lowering it
+  lands on target. Arrival is therefore "within `--tol`, or stopped within `--sag-tol`"; a joint that
+  stops further away than that for `--stall-s` is a stall and ends the run.
+- `shoulder_pan` and `shoulder_lift` only hold position so far.
 
 ## Suggested next steps for the drone world-model plan
 
