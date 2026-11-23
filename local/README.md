@@ -575,6 +575,42 @@ Reading it:
 - Limits: 95 s of training data, four joints in one plane, one scene. The test is offline. Nothing has yet
   chosen actions on the real arm.
 
+### Closed-loop image-goal reaching on the arm
+
+`local/arm_plan.py` uses the predictor to drive the real arm to a goal image. Per episode the arm visits a
+random pose, the camera records the goal image there, the arm moves to a different random pose, and then
+for 14 steps of 0.5 s a CEM planner (256 samples, 3 iterations, horizon 2) picks the joint-delta action
+whose predicted features land closest to the goal image's features. The planner gets images and its own
+joint angles; the goal's joint angles are kept only for scoring.
+
+```bash
+local/remote/run_on_aorus.sh '~/projects/lerobot/.venv/bin/python' -m local.arm_plan local/data/arm/20261124_011609
+local/remote/run_on_aorus.sh '~/projects/lerobot/.venv/bin/python' -m local.arm_plan local/data/arm/20261124_011609 \
+    --policy random
+```
+
+It runs in the LeRobot environment, which needs `timm` added for the encoder
+(`uv pip install --python ~/projects/lerobot/.venv/bin/python --no-deps timm==1.0.31`).
+
+ViT-L features, predictor trained on 95 s of run `20261124_011609`. Mean absolute joint error to the goal,
+start -> after 7 s:
+
+| Policy | Episodes | All joints | elbow_flex | wrist_flex | wrist_roll | gripper | Got closer |
+|---|---|---|---|---|---|---|---|
+| Planning, seed 0 | 3 | 7.4 -> 2.9 deg | 7.4 -> 2.3 | 12.4 -> 1.1 | 6.0 -> 4.6 | 3.6 -> 3.8 | 3 of 3 |
+| Planning, seed 1 | 6 | 6.2 -> 2.9 deg | 8.8 -> 1.6 | 5.8 -> 1.3 | 5.3 -> 5.9 | 4.8 -> 2.6 | 6 of 6 |
+| Random actions, seed 1 | 6 | 6.5 -> 6.5 deg | 6.0 -> 6.9 | 7.7 -> 6.8 | 8.3 -> 7.5 | 3.8 -> 4.7 | 4 of 6 |
+
+- Planning from images works on the real arm: error falls in every episode, mostly within the first 3 s,
+  then holds at about 2.8 deg. Random actions of the same size leave it unchanged.
+- Elbow and wrist flex converge to 1 to 2 deg. Wrist roll does not improve and the gripper is mixed: these
+  are the joints whose effect on the image is small, so the feature distance barely rewards getting them
+  right. Feature distance to the goal ends at about 0.19 against a noise floor of 0.08.
+- The scene check (live features against training frames at the same pose) read 0.22 against 0.20 between
+  training pairs, so the camera had not moved. The planner stops itself if that check exceeds 1.5x.
+- Limits: 9 planning episodes, goals drawn from the same +/-10 deg box as the training data, same scene
+  and lighting as training, four joints in one plane.
+
 ## Suggested next steps for the drone world-model plan
 
 1. Wire `load_model("vjepa2_ac_vit_giant")` into an image-goal MPC loop (the energy
