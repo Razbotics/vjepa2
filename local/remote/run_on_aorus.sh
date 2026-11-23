@@ -10,6 +10,8 @@
 #   git    push the current branch to origin (the Razbotics/vjepa2 fork), then on the
 #          desktop fetch and hard-reset that branch to origin/<branch>. Only committed
 #          work travels; the script warns if the tree is dirty.
+#          Untracked non-ignored files on the desktop (e.g. left by an earlier SYNC=rsync
+#          run) are removed first; ignored paths (.venv, checkpoints, local/runs, local/data) stay.
 #   rsync  copy the working tree as-is (uncommitted edits included), excluding .venv,
 #          checkpoints, local/runs, local/data. Use for quick experiments before a commit.
 #   NO_SYNC=1 skips syncing entirely.
@@ -32,7 +34,7 @@ elif [ "$SYNC" = "git" ]; then
         git -C "$HERE" status --short >&2
     fi
     git -C "$HERE" push -q origin "$branch"
-    ssh "$REMOTE" "cd $REMOTE_DIR && git fetch -q origin && git checkout -q -B $branch origin/$branch && git reset -q --hard origin/$branch && echo \"[run_on_aorus] $REMOTE at \$(git log --oneline -1)\""
+    ssh "$REMOTE" "cd $REMOTE_DIR && git fetch -q origin && git reset -q --hard && git clean -qfd && git checkout -q -B $branch origin/$branch && git reset -q --hard origin/$branch && echo \"[run_on_aorus] $REMOTE at \$(git log --oneline -1)\""
 elif [ "$SYNC" = "rsync" ]; then
     rsync -az --delete \
         --exclude .venv --exclude checkpoints --exclude 'local/runs' --exclude 'local/data' \
