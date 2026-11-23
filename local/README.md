@@ -527,6 +527,54 @@ Reading it:
 - Limits: one scene, one session, one lighting. This says the state is present, not that it survives a
   change of background or light. That needs a second run under different conditions as the test set.
 
+### Action-conditioned predictor on frozen features
+
+`local/arm_predictor.py` trains a 7.7M-parameter transformer that takes the 4x4 feature grid of a frame,
+the measured joint angles and an action (the measured joint-angle change over the next 0.5 s), and predicts
+the feature grid 0.5 s later. Same idea as V-JEPA 2-AC, with joint-space actions and our own data.
+
+```bash
+local/remote/run_on_aorus.sh python -m local.arm_predictor local/data/arm/20261124_011609
+local/remote/run_on_aorus.sh python -m local.arm_predictor local/data/arm/20261124_011609 \
+    --model vjepa2_1_vit_large_384
+```
+
+Trained on the first 95 s of run `20261124_011609`, tested on the last 22 s (1 s gap). Training takes about
+two minutes per model. Test results, 0.5 s step, average joint change per step about 1.1 deg:
+
+| | ViT-B features | ViT-L features |
+|---|---|---|
+| Feature L1: copy (predict no change) | 0.277 | 0.215 |
+| Feature L1: same network without actions | 0.271 | 0.215 |
+| Feature L1: with actions | 0.241 | 0.184 |
+| Decoded joint error: copy | 1.43 deg | 1.41 deg |
+| Decoded joint error: without actions | 1.91 deg | 1.80 deg |
+| Decoded joint error: with actions | 1.08 deg | 0.88 deg |
+| Decoded joint error: real future features (probe floor) | 0.70 deg | 0.69 deg |
+| True action ranked first of 64 (chance 1.6%) | 15.5% | 21.5% |
+| Mean rank of the true action | 11.5 | 8.8 |
+| Chosen action off by (random pick: 1.80 deg) | 0.79 deg | 0.69 deg |
+| Rollout 2.5 s, decoded joint error (copy 2.9 deg) | 1.67 deg | 1.26 deg |
+
+"Decoded joint error" reads joint angles out of the predicted features with a linear probe fitted on the
+training frames and compares them with the real future angles.
+
+Reading it:
+
+- The predictor uses the action. Without it the network is no better than copying; with it, the decoded
+  error on ViT-L falls from 1.41 to 0.88 deg against a floor of 0.69.
+- It can rank actions, which is what planning needs: the action it prefers is off by 0.7 deg per joint
+  where a random candidate is off by 1.8. Exact top-1 is low because many candidates differ by less than
+  the noise.
+- Errors grow slowly over a 2.5 s rollout and stay well under the copy baseline.
+- ViT-L features are better than ViT-B on every measure here.
+- Feature L1 moves little in absolute terms because most of it is per-frame sensor noise the predictor
+  cannot and should not predict. Judge the model by the decoded and ranking rows.
+- At a 0.2 s step the arm moves about 0.5 deg per step and the action signal is nearly lost in that noise
+  (decoded error equal to copy), hence the 0.5 s default.
+- Limits: 95 s of training data, four joints in one plane, one scene. The test is offline. Nothing has yet
+  chosen actions on the real arm.
+
 ## Suggested next steps for the drone world-model plan
 
 1. Wire `load_model("vjepa2_ac_vit_giant")` into an image-goal MPC loop (the energy
