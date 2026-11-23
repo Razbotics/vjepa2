@@ -344,6 +344,58 @@ replug and reboot:
   through the logged-in seat's ACL; add the user to the `video` group if the box is ever
   switched to a text-only boot.
 
+### Live image-goal readout (V-JEPA 2-AC)
+
+`local/live_goal.py` encodes a goal image once with the 2-AC ViT-g encoder, then for every
+new camera frame reports the latent distance to the goal and asks the action-conditioned
+predictor which of 7 candidate moves (stay, +/-x, +/-y, +/-z by 5 cm) lands closest to it.
+
+```bash
+local/remote/run_on_aorus.sh python -m local.live_goal                             # goal = current view
+local/remote/run_on_aorus.sh python -m local.live_goal --goal local/runs/goal.jpg  # goal from a file
+local/remote/run_on_aorus.sh python -m local.live_goal --no-actions                # distance only
+```
+
+Measured 2026-11-23 on the RTX 4060 Ti, bf16, 256 px, one frame per decision:
+
+| Mode | Encode | Predictor x7 | Frame age at output | Rate | Peak mem |
+|---|---|---|---|---|---|
+| Goal distance + 7 candidate actions | 80 ms | 83 ms | 180 ms (p95 197) | 6.1 Hz | 5.1 GB |
+| Goal distance only | 79 ms | n/a | 97 ms (p95 113) | 12.5 Hz | 5.0 GB |
+
+What the two distance columns read, same camera, same room:
+
+| Goal image | `E_goal` (patch-token L1) | `d_pool` (pooled cosine) | Best action |
+|---|---|---|---|
+| The identical frame | 0 | 0 | n/a |
+| Live view, static scene | 0.46 (0.44-0.48) | 0.004 (0.002-0.011) | stay, 67 of 68 decisions |
+| Frame from before the camera was moved | 0.70 | 0.21 | +z every time |
+| Unrelated video frame | 0.71 | 0.30 | +z every time |
+
+Things this taught us:
+- **`E_goal` has a high noise floor.** The quantity the paper's planner minimizes reads
+  0.46 between two frames of a static scene, against 0.71 for an unrelated one. Sensor
+  noise alone moves ViT-g patch tokens that far: Gaussian noise of sigma 1/255 on a clean
+  image already gives 0.27, sigma 2 gives 0.33, a 4 px shift 0.49. The bundled Franka
+  example bottoms out at 0.41 for the same reason. So the planner works inside a band about
+  0.25 wide. It is stable (+/-0.02), so it is usable, but it is not a distance-to-goal in
+  any metric sense. Averaging 4 frames only lowers the floor to 0.40.
+- **Pooling fixes the separation but not the planning.** Mean-pooling tokens before
+  comparing gives 0.004 vs 0.2-0.3, a ~50x gap, because per-patch noise averages out. That
+  is the right signal for "have I arrived", but it discards the spatial layout the
+  predictor is supposed to steer.
+- **The predictor does prefer staying when it is already at the goal** (spread across
+  candidates 0.05, "stay" lowest in 67 of 68 decisions). Away from the goal it always says
+  +z with a small spread (0.01-0.02); that is not meaningful. 2-AC was trained on a Franka
+  arm from a fixed exocentric camera and is fed a fixed arm pose here, so for a moving
+  camera the action column is a plumbing and latency check only.
+- **Latency.** 6 Hz for encode plus 7 one-step rollouts is already half of the 300 ms
+  decision budget in PLAN.md, with a 1B-param encoder and no CEM. A distilled encoder (the
+  2.1 ViT-B runs in 25 ms) with a predictor trained on our own actions is the route.
+- **Camera warm-up.** The C270 returns black frames for about a second after opening; the
+  script waits for brightness to settle before taking a goal frame. Compute `d_pool` with an
+  elementwise product, not `@`: under autocast the matmul runs in bf16 and quantizes it.
+
 ## Suggested next steps for the drone world-model plan
 
 1. Wire `load_model("vjepa2_ac_vit_giant")` into an image-goal MPC loop (the energy
