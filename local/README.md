@@ -412,7 +412,7 @@ local/remote/run_on_aorus.sh '~/projects/lerobot/.venv/bin/python' -m local.arm_
 ```
 
 Output goes to `local/data/arm/<timestamp>/` (`frames/*.jpg`, `log.npz`, `meta.json`). First run, wrist
-roll and gripper only, 640x480:
+roll and gripper only, at 640x480 (the default is now 640x360, see below):
 
 | | |
 |---|---|
@@ -431,6 +431,10 @@ Things to know:
 - Speed and acceleration limits are RAM registers and reset on power-cycle, so they are set every run.
 - In the folded rest pose `shoulder_lift` and `elbow_flex` sit a few ticks outside the calibrated range, on
   their hard stops. Goals are clipped to the range.
+- Camera field of view: the C270 has no zoom control and 1280x720 is its widest mode. 640x360 shows the
+  same view scaled down; the 4:3 modes (640x480) crop the left and right edges, and 1280x960 silently falls
+  back to 1280x720. `preprocess` then centre-crops a square, so the encoder only sees the middle 56% of the
+  width.
 - Only `wrist_roll` and `gripper` have been moved so far. The gravity-loaded joints need a ready pose chosen
   with the camera watching the arm before `--joints` is widened.
 

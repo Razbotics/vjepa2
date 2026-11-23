@@ -99,8 +99,9 @@ def main():
     ap.add_argument("--no-camera", action="store_true", help="log joints only, at --rate Hz")
     ap.add_argument("--rate", type=float, default=30.0, help="log rate without a camera")
     ap.add_argument("--camera", default="/dev/video0")
+    # 16:9 on purpose: the C270's 4:3 modes crop the sides of the sensor, 640x360 keeps the full 720p view.
     ap.add_argument("--width", type=int, default=640)
-    ap.add_argument("--height", type=int, default=480)
+    ap.add_argument("--height", type=int, default=360)
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--jpeg-quality", type=int, default=92)
     ap.add_argument("--exposure", type=int, default=None, help="lock manual exposure (C270 units of 100 us)")
