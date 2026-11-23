@@ -396,6 +396,44 @@ Things this taught us:
   script waits for brightness to settle before taking a goal frame. Compute `d_pool` with an
   elementwise product, not `@`: under autocast the matmul runs in bf16 and quantizes it.
 
+## SO-101 arm on aorus
+
+The SO-101 follower (no leader arm) is on `aorus` at `/dev/ttyACM0`; scripts use the stable
+`/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B91028149-if00`. LeRobot 0.6.2 (commit `ae2b57f`, same as
+the Mac checkout) lives in its own environment, `~/projects/lerobot/.venv`, because it pins `torch<2.12`
+and the V-JEPA environment runs 2.15. Calibration id is `my_follower_arm`; the file was copied from the Mac
+to `~/.cache/huggingface/lerobot/calibration/robots/so_follower/` and matches the servo EEPROMs.
+
+`local/arm_collect.py` drives the joints named in `--joints` through small random moves around the start
+pose and logs, for every camera frame, the measured joint positions, goals and loads:
+
+```bash
+local/remote/run_on_aorus.sh '~/projects/lerobot/.venv/bin/python' -m local.arm_collect --seconds 20
+```
+
+Output goes to `local/data/arm/<timestamp>/` (`frames/*.jpg`, `log.npz`, `meta.json`). First run, wrist
+roll and gripper only, 640x480:
+
+| | |
+|---|---|
+| Log rate | 30.1 Hz, one sample per camera frame, no frames dropped |
+| Joint read after frame capture | median 3.3 ms, p95 4.2 ms |
+| Settled error at each target | mean 3.5 ticks, max 5 ticks (0.44 deg) |
+| Peak servo load | 76 of 1000 |
+| Size | 24 MB for 20 s |
+
+Things to know:
+
+- The servos run P = 16, I = 0, D = 32 and stop up to 5 ticks short of the goal. Use `pos_raw` or `pos_deg`
+  (measured) as ground truth, never `goal_raw`.
+- The script connects the motor bus only. `SO101Follower.connect()` also rewrites gains and re-enables
+  torque on every joint, which is not wanted for a first contact.
+- Speed and acceleration limits are RAM registers and reset on power-cycle, so they are set every run.
+- In the folded rest pose `shoulder_lift` and `elbow_flex` sit a few ticks outside the calibrated range, on
+  their hard stops. Goals are clipped to the range.
+- Only `wrist_roll` and `gripper` have been moved so far. The gravity-loaded joints need a ready pose chosen
+  with the camera watching the arm before `--joints` is widened.
+
 ## Suggested next steps for the drone world-model plan
 
 1. Wire `load_model("vjepa2_ac_vit_giant")` into an image-goal MPC loop (the energy

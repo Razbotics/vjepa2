@@ -217,7 +217,8 @@ def main():
                     vals += [np.mean(win[k]) if win[k] else float("nan") for k in ("pred", "age")]
                     out = " ".join(f"{v:7.1f}" for v in vals)
                     out += f" {np.mean(win['e_goal']):7.4f} {np.mean(win['d_pool']):7.4f} {top:>7}"
-                    out += "".join(f" {np.mean(win[k]) if win[k] else float('nan'):7.4f}" for k in ("e_best", "spread"))
+                    tail = [np.mean(win[k]) if win[k] else float("nan") for k in ("e_best", "spread")]
+                    out += "".join(f" {v:7.4f}" for v in tail)
                     print(out, flush=True)
                     win = collections.defaultdict(list)
                     win_best = collections.Counter()
