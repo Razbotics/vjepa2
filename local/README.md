@@ -435,6 +435,18 @@ Things to know:
   same view scaled down; the 4:3 modes (640x480) crop the left and right edges, and 1280x960 silently falls
   back to 1280x720. `preprocess` then centre-crops a square, so the encoder only sees the middle 56% of the
   width.
+#### Live preview for aiming the camera
+
+```bash
+local/remote/camera_preview.sh        # then open http://localhost:8765 on the laptop
+```
+
+Starts `local/camera_preview.py` on the desktop and forwards the port over SSH (the server binds to
+localhost only). The page shows the feed at about 15 fps with a yellow square marking the centre crop the
+encoder sees, plus mean brightness and the share of blown-out pixels. `/snapshot.jpg` returns one frame.
+Ctrl-C stops it; it must be stopped before `arm_collect.py` or the `live_*` scripts, because only one
+program can hold the camera.
+
 #### Ready pose and the side camera
 
 `--ready table` first moves the arm from its rest pose to a ready pose (elbow, then wrist, one joint at a
