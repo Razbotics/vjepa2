@@ -304,6 +304,46 @@ lands exactly on the +0.075 corner), a setting the laptop cannot hold in memory.
 still ~25x off real time for the paper's 400 x 10 planner, so predictor batching and a
 smaller predictor are the Phase-2 levers, not a bigger GPU.
 
+## Live camera (Logitech C270 on aorus)
+
+The C270 is plugged into the desktop as `/dev/video0` (USB 046d:0825, 720p MJPG).
+`local/live_camera.py` grabs frames in a background thread, keeps a rolling window,
+preprocesses on the GPU and encodes the newest clip as fast as the device allows.
+Headless: one line per second plus a summary.
+
+```bash
+local/remote/run_on_aorus.sh python -m local.live_camera                      # ViT-L, 16 frames @256
+local/remote/run_on_aorus.sh python -m local.live_camera --model vjepa2_1_vit_base_384
+local/remote/run_on_aorus.sh python -m local.live_camera --frames 8 --stride 4 --exposure 150
+```
+
+Measured 2026-11-23, RTX 4060 Ti, bf16, 256 px, camera at 29.8 fps:
+
+| Model | Clip | Preprocess | Encoder | Newest-frame age | Loop rate | Peak mem |
+|---|---|---|---|---|---|---|
+| 2.1 ViT-L | 16 frames, stride 2 (1 s) | 11 ms | 72 ms | 107 ms (p95 121) | 11 Hz | 1.4 GB |
+| 2.1 ViT-B | 16 frames, stride 2 (1 s) | 11 ms | 25 ms | 61 ms (p95 75) | 23 Hz | 0.6 GB |
+| 2.1 ViT-L | 8 frames, stride 4 (0.9 s) | 6 ms | 48 ms | 73 ms (p95 88) | 17.5 Hz | 1.3 GB |
+
+"Newest-frame age" is wall time from the capture of the last frame in the clip to the
+encoder returning, i.e. the staleness a planner would act on. It is roughly
+preprocess + encoder + up to one camera frame of waiting. `d_ref` / `d_prev` are cosine
+distances of mean-pooled features against the first / previous clip: ~0.000 with the
+camera still, a few hundredths when the scene changes.
+
+Camera gotchas, all handled by the script on every start because V4L2 controls reset on
+replug and reboot:
+- `exposure_dynamic_framerate` defaults to on and silently drops the camera to ~20 fps in
+  a dim room. The script turns it off; the model assumes a constant time step.
+- `power_line_frequency` defaults to 60 Hz; India is 50 Hz (`--mains-hz`).
+- Do not set `CAP_PROP_BUFFERSIZE=1` in OpenCV: the C270 then delivers exactly 15 fps.
+- `--exposure N` locks manual exposure (units of 100 us). Above ~330 the exposure no
+  longer fits in a 33 ms frame and the rate falls (400 gave 25 fps). 150 is sharp but
+  dark indoors; auto-exposure is the default.
+- `v4l2-ctl` comes from `sudo apt-get install v4l-utils`. Device access over SSH works
+  through the logged-in seat's ACL; add the user to the `video` group if the box is ever
+  switched to a text-only boot.
+
 ## Suggested next steps for the drone world-model plan
 
 1. Wire `load_model("vjepa2_ac_vit_giant")` into an image-goal MPC loop (the energy
