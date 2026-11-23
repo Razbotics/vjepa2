@@ -483,6 +483,10 @@ First 30 s run at the ready pose, four joints moving +/-10 deg, 640x360:
   lands on target. Arrival is therefore "within `--tol`, or stopped within `--sag-tol`"; a joint that
   stops further away than that for `--stall-s` is a stall and ends the run.
 - `shoulder_pan` and `shoulder_lift` only hold position so far.
+- Side view against behind view, same 2-minute run and joints: mean pixel change inside the encoder's crop
+  square is 11.8 (of 255) from the side and 4.8 from behind. From behind the elbow and wrist move along the
+  line of sight and are mostly hidden. First clean side-view run: `local/data/arm/20261124_011609` on aorus
+  (3,601 samples, 128 MB, nobody in view, gripper inside the square at every extreme).
 
 ## Suggested next steps for the drone world-model plan
 
