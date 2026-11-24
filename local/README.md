@@ -892,6 +892,56 @@ Reading:
   with the goal's features and never reads position out. What it needs is that features change
   predictably with the controller's targets, which is what the predictor will test next.
 
+### Action-conditioned predictor for the drone
+
+`drone_predictor.py` is `arm_predictor.py` with a drone-shaped state and action, everything in the heading
+frame at t (x forward, y left, z up), since the camera sees the world from there:
+
+- **State** (onboard-sensor quantities): velocity, height, roll and pitch, and where the controller's target
+  sits relative to the drone. Unlike the arm, a drone has momentum, so velocity matters.
+- **Action**: how the controller's target moves over the 0.5 s step (forward, left, up, heading change),
+  what a planner would command. On the test part an action moves the target 11 cm forward, 11 cm sideways,
+  4 cm up and 7 deg in heading on average.
+- **Outputs**: next features and also the **next state** (a second head on the state token), so rollouts
+  and the planner can chain steps without the real future state. For the arm, next state was state + action.
+
+Same 7.9M-parameter network as the arm, 6,000 steps on the first 48 min (3.8 min per model on the 4060 Ti),
+tested on the last 12 min.
+
+```bash
+.venv/bin/python -m local.drone_predictor local/data/sim_drone/hour_seed1 --model vjepa2_1_vit_large_384
+```
+
+| Test (held-out last 12 min) | Copy (no change) | No actions | **With actions** |
+|---|---|---|---|
+| Feature error (L1) | 0.657 | 0.536 | **0.376** |
+| Next velocity error | 32 cm/s | | **4.5 cm/s** |
+| Next tilt error | 8.1 deg | | **2.2 deg** |
+| Tilt read from predicted features | 8.0 deg | 4.8 deg | **2.6 deg** (floor 0.9) |
+| Heading read from predicted features | 13.7 deg | 14.1 deg | **13.4 deg** (floor 11.1) |
+
+| Action ranking: true action among 64 | Drone | Arm, sim, 48 min |
+|---|---|---|
+| Ranked first | **65.0%** (chance 1.6%) | 79.5% |
+| Mean rank | 3.9 | 1.4 |
+| Best-scoring action is off by | **5.0 cm, 1.7 deg** (random pick 28.1 cm, 10.7 deg) | 0.19 deg per joint |
+
+Rollout, predicted features and state fed back for 5 steps (2.5 s): feature error 0.376, 0.444, 0.486, 0.517,
+0.540 against copy's 0.657-0.873, so predictions stay well ahead of "nothing changes" throughout.
+
+Reading:
+
+- The drone's view changes a lot in 0.5 s, so copying the frame is a weak baseline (0.657, against 0.186
+  for the arm). Actions cut that error by 43% (the arm's by 28%).
+- Unlike the arm, the no-actions model beats copy (0.536 vs 0.657): from the velocity in the state it can
+  extrapolate momentum. Actions still remove most of what is left.
+- The ranking test is the one that matters for planning, and it works: the predictor tells the right move
+  apart from 63 others two times in three, and when it does not, it picks one within about 5 cm and 2 deg.
+- Absolute pose read out of the features is too coarse to judge 10-20 cm steps (position reads to ~92 cm
+  even from the real future frame), so the decoded-position rows are not informative here. A linear probe
+  on the frame pair (now, 0.5 s later) could not read the step's motion even from real frames either; it
+  was dropped.
+
 ## Suggested next steps for the drone world-model plan
 
 1. Wire `load_model("vjepa2_ac_vit_giant")` into an image-goal MPC loop (the energy
