@@ -53,7 +53,7 @@ Downloaded into `checkpoints/` (resumable with `curl -L -C -`):
 |---|---|---|---|
 | `vjepa2_1_vitb_dist_vitG_384.pt` | V-JEPA 2.1 ViT-B/16, 384px | 1.6 GB | fastest full-quality encoder for laptop work |
 | `vjepa2_1_vitl_dist_vitG_384.pt` | V-JEPA 2.1 ViT-L/16, 384px | 4.8 GB | the encoder PLAN.md targets |
-| `vjepa2-ac-vitg.pt` | V-JEPA 2-AC (ViT-g encoder + action-conditioned predictor) | 11 GB | Phase 1 planning baseline |
+| `vjepa2-ac-vitg.pt` | V-JEPA 2-AC (ViT-g encoder + action-conditioned predictor) | 11 GB | Phase 1 planning baseline; unused by the SO-101 pipeline, kept on the Mac only (deleted on aorus 2026-11-24) |
 
 Others (same CDN, `https://dl.fbaipublicfiles.com/vjepa2/<file>`): `vitl.pt`, `vith.pt`,
 `vitg.pt`, `vitg-384.pt` (V-JEPA 2), `vjepa2_1_vitg_384.pt`, `vjepa2_1_vitG_384.pt` (2.1
