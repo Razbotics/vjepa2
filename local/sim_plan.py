@@ -16,6 +16,14 @@ starts depend only on --seed, so different policies and predictors face the same
 
 Reports joint error and gripper-tip distance to the goal, before and after. Writes goal, start and final
 frames and a montage to local/runs/sim_plan_<policy>_<pred>_<ts>/.
+
+--view also plays the run in MuJoCo's viewer at real-time speed, with the goal pose drawn as a green
+ghost arm. The ghost exists only in the viewer: the planner's camera renders its own scene and never sees
+it. From the laptop, onto the desktop's screen:
+
+    ssh aorus 'cd projects/vjepa2 && DISPLAY=:0 XAUTHORITY=/run/user/1000/gdm/Xauthority nohup \
+        ~/projects/lerobot/.venv/bin/python -m local.sim_plan local/data/sim_arm/hour_seed1 --view \
+        > /tmp/sim_plan_view.log 2>&1 &'
 """
 
 import argparse
@@ -29,8 +37,59 @@ import torch
 
 from local.arm_plan import cem_plan, encode_frames
 from local.arm_predictor import Predictor
-from local.sim_arm import JOINTS, SimArm
+from local.sim_arm import CAMERA, JOINTS, SimArm
 from local.vjepa_local import IMAGENET_MEAN, IMAGENET_STD, load_model, pick_device
+
+
+class Live:
+    """Shows the simulation in MuJoCo's viewer, paced to real time, with the goal pose as a ghost arm."""
+
+    GHOST_RGBA = (0.25, 0.9, 0.35, 0.35)
+
+    def __init__(self, arm, camera):
+        import mujoco
+        import mujoco.viewer
+
+        self.mj, self.arm = mujoco, arm
+        self.v = mujoco.viewer.launch_passive(arm.model, arm.data, show_left_ui=False, show_right_ui=False)
+        self.v.cam.lookat[:] = camera["lookat"]
+        self.v.cam.distance, self.v.cam.azimuth, self.v.cam.elevation = (
+            camera["distance"], camera["azimuth"], camera["elevation"])
+        self.ghost = mujoco.MjData(arm.model)
+        self.dt, self.next = 1.0 / arm.fps, time.perf_counter()
+
+    def running(self):
+        return self.v.is_running()
+
+    def set_goal(self, q_deg):
+        """Draw the arm's moving parts at q_deg, see-through green, into the viewer's extra scene."""
+        mj, scn = self.mj, self.v.user_scn
+        self.ghost.qpos[:] = np.radians(q_deg)
+        mj.mj_kinematics(self.arm.model, self.ghost)
+        with self.v.lock():
+            scn.ngeom = 0
+            mj.mjv_addGeoms(self.arm.model, self.ghost, mj.MjvOption(), mj.MjvPerturb(),
+                            mj.mjtCatBit.mjCAT_DYNAMIC, scn)
+            for i in range(scn.ngeom):
+                scn.geoms[i].rgba[:] = self.GHOST_RGBA
+
+    def text(self, left, right):
+        mj = self.mj
+        self.v.set_texts((mj.mjtFont.mjFONT_BIG, mj.mjtGridPos.mjGRID_TOPLEFT, left, right))
+
+    def frame(self):
+        """Call after each simulated frame: show it, and wait until its real-time slot."""
+        self.v.sync()
+        self.next += self.dt
+        now = time.perf_counter()
+        if now > self.next + 0.25:  # fell behind (planning, encoding): restart the clock, don't fast-forward
+            self.next = now
+        time.sleep(max(0.0, self.next - now))
+
+    def hold(self, seconds):
+        self.v.sync()
+        time.sleep(seconds)
+        self.next = time.perf_counter()
 
 
 def main():
@@ -51,6 +110,8 @@ def main():
     ap.add_argument("--min-height", type=float, default=0.03)
     ap.add_argument("--seed", type=int, default=100, help="episode seed (training runs used 0 and 1)")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--view", action="store_true", help="play the run live in the MuJoCo viewer")
+    ap.add_argument("--hold", type=float, default=1.5, help="--view: seconds to pause on each new goal")
     args = ap.parse_args()
 
     device = pick_device(None)
@@ -72,6 +133,7 @@ def main():
     lo, hi = (np.array(b) for b in meta["box_deg"])
     lo_t, hi_t = (torch.tensor(b, device=device, dtype=torch.float32) for b in (lo, hi))
     ramp = margs["speed"] / margs["fps"]
+    live = Live(arm, meta.get("camera", CAMERA)) if args.view else None
 
     def see():
         frame = arm.render()
@@ -102,6 +164,10 @@ def main():
         q_goal, tip_goal = arm.q_deg, arm.tip()
         arm.reset(random_pose(away_from=q_goal))
         _, img_start = see()
+        if live:
+            live.set_goal(q_goal)
+            live.text(f"episode {ep + 1}/{args.episodes}  ({args.policy})", "green ghost = goal pose")
+            live.hold(args.hold)
 
         trace, goal_cmd, plan_ms = [], arm.q_deg, []
         for step in range(args.steps + 1):
@@ -112,6 +178,9 @@ def main():
                 "tip_cm": float(100 * np.linalg.norm(arm.tip() - tip_goal)),
                 "energy": float((z - z_goal).abs().mean()),
             })
+            if live:
+                live.text(f"episode {ep + 1}/{args.episodes}  step {step}/{args.steps}  ({args.policy})",
+                          f"tip {trace[-1]['tip_cm']:.1f} cm from goal")
             if step == args.steps:
                 break
             if args.policy == "plan":
@@ -125,6 +194,8 @@ def main():
             for _ in range(k):  # 0.5 s, goal ramped at the collection speed
                 goal_cmd = goal_cmd + np.clip(target - goal_cmd, -ramp, ramp)
                 arm.step(goal_cmd)
+                if live:
+                    live.frame()
         _, img_final = see()
         e0, e1 = np.array(trace[0]["err"]), np.array(trace[-1]["err"])
         results.append({"goal_deg": q_goal.tolist(), "trace": trace})
@@ -135,6 +206,10 @@ def main():
             f"ep {ep:2d}: joints {e0.mean():5.2f} -> {e1.mean():5.2f} deg | tip {trace[0]['tip_cm']:4.1f} -> "
             f"{trace[-1]['tip_cm']:4.1f} cm | per joint " + " ".join(f"{a:.1f}->{b:.1f}" for a, b in zip(e0, e1)) + ms
         )
+        if live:
+            live.hold(args.hold)
+            if not live.running():  # window closed: stop and report what ran
+                break
 
     s = np.array([np.mean(r["trace"][0]["err"]) for r in results])
     f = np.array([np.mean(r["trace"][-1]["err"]) for r in results])
