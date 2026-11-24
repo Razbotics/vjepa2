@@ -11,7 +11,7 @@ layout: four rotors at the tips of a 92 mm (motor to motor) X frame, each pushin
 twisting the body with its drag torque, with a first-order spin-up lag. Each rotor's command is its thrust
 in newtons.
 
-Control runs at the physics rate (500 Hz), as on the real flight controller: a position loop turns the
+Control runs at the physics rate (about 510 Hz), as on the real flight controller: a position loop turns the
 target position into a desired thrust direction, and a geometric attitude loop (Lee, Leok and McClamroch,
 2010) turns that into body torques. The four rotor thrusts are then solved from total thrust and torques
 (the "mixer"). Later, a learned planner will give targets to this controller, not raw rotor thrusts: the
@@ -42,6 +42,11 @@ ROTORS = np.array([[ARM, -ARM], [-ARM, -ARM], [-ARM, ARM], [ARM, ARM]])
 SPIN = np.array([-1.0, 1.0, -1.0, 1.0])
 ROOM = 3.0  # m, half-width of the square room
 FPV_TILT = 15.0  # deg, onboard camera pitched down
+# Room furniture: pillars (x, y, colour) are cylinders of radius 0.12 m, 2 m tall; boxes (x, y, half-size, colour)
+PILLAR_R = 0.12
+PILLARS = [(1.6, 1.2, "1 0.35 0.2"), (-1.4, 1.7, "0.2 0.6 1"), (1.9, -1.5, "1 0.85 0.15"),
+           (-1.8, -1.1, "0.6 0.3 0.9"), (0.3, 2.3, "0.2 0.8 0.4"), (-0.4, -2.2, "0.9 0.3 0.6")]
+BOXES = [(0.9, -0.6, 0.15, "0.85 0.5 0.3"), (-0.8, 0.5, 0.25, "0.35 0.45 0.55"), (2.3, 0.4, 0.2, "0.5 0.7 0.3")]
 
 
 def _scene_xml():
@@ -66,13 +71,10 @@ def _scene_xml():
     src = src.replace('<key name="hover" qpos="0 0 0.1 1 0 0 0" ctrl="0.26487 0 0 0"/>', "")
 
     r, h = ROOM, 1.25  # walls 2.5 m tall
-    pillars = [(1.6, 1.2, "1 0.35 0.2"), (-1.4, 1.7, "0.2 0.6 1"), (1.9, -1.5, "1 0.85 0.15"),
-               (-1.8, -1.1, "0.6 0.3 0.9"), (0.3, 2.3, "0.2 0.8 0.4"), (-0.4, -2.2, "0.9 0.3 0.6")]
-    boxes = [(0.9, -0.6, 0.15, "0.85 0.5 0.3"), (-0.8, 0.5, 0.25, "0.35 0.45 0.55"), (2.3, 0.4, 0.2, "0.5 0.7 0.3")]
     furniture = "".join(
-        f'\n    <geom type="cylinder" size="0.12 1" pos="{x} {y} 1" rgba="{c} 1"/>' for x, y, c in pillars
+        f'\n    <geom type="cylinder" size="{PILLAR_R} 1" pos="{x} {y} 1" rgba="{c} 1"/>' for x, y, c in PILLARS
     ) + "".join(
-        f'\n    <geom type="box" size="{s} {s} {s}" pos="{x} {y} {s}" rgba="{c} 1"/>' for x, y, s, c in boxes
+        f'\n    <geom type="box" size="{s} {s} {s}" pos="{x} {y} {s}" rgba="{c} 1"/>' for x, y, s, c in BOXES
     )
     room = f"""
   <visual>
@@ -84,21 +86,31 @@ def _scene_xml():
     <texture type="2d" name="floor" builtin="checker" rgb1="0.55 0.5 0.45" rgb2="0.35 0.32 0.3" width="512"
       height="512" mark="edge" markrgb="0.2 0.2 0.2"/>
     <material name="floor" texture="floor" texrepeat="12 12" texuniform="false"/>
-    <texture type="2d" name="wallA" builtin="checker" rgb1="0.8 0.78 0.72" rgb2="0.65 0.7 0.75"
+    <texture type="2d" name="wallN" builtin="checker" rgb1="0.8 0.78 0.72" rgb2="0.65 0.7 0.75"
       width="256" height="256"/>
-    <material name="wallA" texture="wallA" texrepeat="6 3"/>
-    <texture type="2d" name="wallB" builtin="gradient" rgb1="0.75 0.82 0.7" rgb2="0.5 0.6 0.55"
+    <material name="wallN" texture="wallN" texrepeat="6 3"/>
+    <texture type="2d" name="wallS" builtin="checker" rgb1="0.78 0.82 0.7" rgb2="0.55 0.65 0.55"
       width="256" height="256"/>
-    <material name="wallB" texture="wallB" texrepeat="1 1"/>
+    <material name="wallS" texture="wallS" texrepeat="6 3"/>
+    <texture type="2d" name="wallE" builtin="checker" rgb1="0.85 0.75 0.7" rgb2="0.7 0.55 0.5"
+      width="256" height="256"/>
+    <material name="wallE" texture="wallE" texrepeat="6 3"/>
+    <texture type="2d" name="wallW" builtin="checker" rgb1="0.75 0.75 0.85" rgb2="0.55 0.55 0.7"
+      width="256" height="256"/>
+    <material name="wallW" texture="wallW" texrepeat="6 3"/>
+    <texture type="2d" name="ceiling" builtin="checker" rgb1="0.9 0.9 0.88" rgb2="0.8 0.8 0.78"
+      width="256" height="256"/>
+    <material name="ceiling" texture="ceiling" texrepeat="4 4"/>
   </asset>
   <worldbody>
-    <light pos="0 0 2.4" dir="0 0 -1" diffuse="0.6 0.6 0.6" castshadow="true"/>
+    <light pos="0 0 2.45" dir="0 0 -1" diffuse="0.6 0.6 0.6" castshadow="true"/>
     <light pos="2 -2 2.2" dir="-0.5 0.5 -1" diffuse="0.3 0.3 0.3" castshadow="false"/>
     <geom name="floor" type="plane" size="{r} {r} 0.05" material="floor"/>
-    <geom type="box" size="{r} 0.05 {h}" pos="0 {r} {h}" material="wallA"/>
-    <geom type="box" size="{r} 0.05 {h}" pos="0 {-r} {h}" material="wallB"/>
-    <geom type="box" size="0.05 {r} {h}" pos="{r} 0 {h}" material="wallB"/>
-    <geom type="box" size="0.05 {r} {h}" pos="{-r} 0 {h}" material="wallA"/>{furniture}
+    <geom type="box" size="{r} 0.05 {h}" pos="0 {r} {h}" material="wallN"/>
+    <geom type="box" size="{r} 0.05 {h}" pos="0 {-r} {h}" material="wallS"/>
+    <geom type="box" size="0.05 {r} {h}" pos="{r} 0 {h}" material="wallE"/>
+    <geom type="box" size="0.05 {r} {h}" pos="{-r} 0 {h}" material="wallW"/>
+    <geom type="box" size="{r} {r} 0.05" pos="0 0 {2 * h + 0.05}" material="ceiling"/>{furniture}
     <camera name="corner" pos="-2.6 -2.6 2.0" xyaxes="0.707 -0.707 0 0.35 0.35 0.87" fovy="60"/>
   </worldbody>
 """
@@ -126,8 +138,8 @@ class Controller:
         self.mix = np.linalg.inv(allocation())
         self.tan_tilt = np.tan(np.radians(max_tilt))
 
-    def __call__(self, p, v, R, w, p_ref, v_ref=np.zeros(3), yaw_ref=0.0):
-        a = self.kp * (p_ref - p) + self.kd * (v_ref - v)
+    def __call__(self, p, v, R, w, p_ref, v_ref=np.zeros(3), yaw_ref=0.0, a_ref=np.zeros(3)):
+        a = a_ref + self.kp * (p_ref - p) + self.kd * (v_ref - v)
         F = MASS * (a + np.array([0.0, 0.0, G]))
         F[2] = max(F[2], 0.2 * MASS * G)
         h = np.linalg.norm(F[:2])
@@ -151,7 +163,8 @@ class SimDrone:
         self.renderer = mujoco.Renderer(self.model, height=height, width=width)
         self.ctrl = Controller()
         self.fps = fps
-        self.substeps = int(round(1.0 / (fps * self.model.opt.timestep)))
+        self.substeps = int(np.ceil(1.0 / (fps * self.model.opt.timestep)))  # 17 at 30 fps
+        self.model.opt.timestep = 1.0 / (fps * self.substeps)  # 1.96 ms, so frames are exactly 1/fps apart
         self._gyro = self.model.sensor_adr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "body_gyro")]
         self._R = np.zeros(9)
 
@@ -189,10 +202,25 @@ class SimDrone:
         return np.degrees([np.arctan2(R[2, 1], R[2, 2]), -np.arcsin(np.clip(R[2, 0], -1, 1)),
                            np.arctan2(R[1, 0], R[0, 0])])
 
-    def tick(self, p_ref, v_ref=np.zeros(3), yaw_ref=0.0, motors_off=False):
+    def hover_at(self, pos, yaw=0.0):
+        """Place the drone in the air, level and still, rotors already spinning at hover thrust."""
+        mujoco.mj_resetData(self.model, self.data)
+        self.data.qpos[:3] = pos
+        self.data.qpos[3:7] = [np.cos(yaw / 2), 0, 0, np.sin(yaw / 2)]
+        self.data.act[:] = MASS * G / 4
+        mujoco.mj_forward(self.model, self.data)
+
+    def touching(self):
+        """True if any part of the drone is in contact with the world."""
+        n, b = self.data.ncon, self.model.geom_bodyid
+        if n == 0:
+            return False
+        return bool(np.any((b[self.data.contact.geom1[:n]] == 1) | (b[self.data.contact.geom2[:n]] == 1)))
+
+    def tick(self, p_ref, v_ref=np.zeros(3), yaw_ref=0.0, motors_off=False, a_ref=np.zeros(3)):
         """One physics step (2 ms) with the controller in the loop."""
         f = np.zeros(4) if motors_off else self.ctrl(self.pos, self.vel, self.R, self.rate, np.asarray(p_ref),
-                                                     np.asarray(v_ref), yaw_ref)
+                                                     np.asarray(v_ref), yaw_ref, np.asarray(a_ref))
         self.data.ctrl[:] = f
         mujoco.mj_step(self.model, self.data)
         return f
