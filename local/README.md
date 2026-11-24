@@ -845,6 +845,53 @@ and no resets** (one segment).
 The lowest point (0.19 m) is under the 0.3 m waypoint floor: on fast descents the drone sinks a little below
 its target. It never touched the floor.
 
+### Do the encoder features carry the drone's pose?
+
+`arm_encode.py` now reads drone runs too (it switches on `meta["robot"] == "crazyflie_2"`) and probes for
+position, roll, pitch, and heading as sine and cosine (heading wraps at +-180 deg). The heading error in
+degrees is read back from the predicted pair. Besides the linear ridge probe, drone runs also get an MLP
+probe (one hidden layer of 512, dropout, early-stopped on the tail of each training part), which asks
+whether the information is in the features at all rather than along straight directions. A
+nearest-neighbour probe was tried first and did worse than linear (150 cm, 60 deg): cosine similarity over
+16k dimensions is dominated by what the drone sees, not where it is.
+
+```bash
+.venv/bin/python -m local.arm_encode local/data/sim_drone/hour_seed1 --models vjepa2_1_vit_large_384
+```
+
+ViT-L encoded all 108,000 frames in 17.4 min (104 fps); probes use every 9th frame (12,000), with the same
+blocked 5-fold split in time as the arm.
+
+| Features | x / y R2 | Height R2, MAE | Roll / pitch R2, MAE | sin / cos heading R2 |
+|---|---|---|---|---|
+| Training mean | 0 / 0 | 0, 39 cm | 0 / 0, 4.9 / 4.8 deg | 0 / 0 |
+| Raw pixels 32x32 | 0.01 / -0.02 | 0.50, 25 cm | 0.14 / 0.24 | -0.02 / -0.01 |
+| ViT-L pooled | 0.66 / 0.68 | 0.97, 5 cm | 0.92 / 0.96, 1.5 / 1.0 deg | 0.88 / 0.89 |
+| ViT-L grid 4x4 | 0.72 / 0.74 | **0.97, 5 cm** | **0.97 / 0.97, 0.9 / 0.9 deg** | **0.93 / 0.94** |
+
+The same in flying terms, mean (median):
+
+| Features, probe | Position off by | Heading off by |
+|---|---|---|
+| Raw pixels, linear | 182 (177) cm | 82 (79) deg |
+| ViT-L grid, linear | 82 (67) cm | 8.7 (6.2) deg |
+| ViT-L grid, MLP | **64 (46) cm** | **8.3 (5.2) deg** |
+| ViT-L pooled, MLP | 66 (49) cm | 8.9 (5.9) deg |
+
+Reading:
+
+- Height, tilt and heading are in the features almost linearly: 5 cm, under 1 deg, about 6 deg median.
+  Tilt shows as the horizon's slant, heading as which coloured wall and pillars are in view.
+- Where the drone is in the room is there only partly and not linearly. A linear map gets to 67 cm median,
+  a small network to 46 cm, against 177 cm for guessing the room's centre. From a forward camera, position
+  is a combination of what is in view and which way the drone faces, which a straight-line readout cannot
+  form. The long tail (mean well above median) fits frames that face a wall up close and show only checker.
+- More data helps: with 3,600 probe frames instead of 12,000 the grid's linear position error was 104 cm and
+  the MLP's 94 cm.
+- For planning to a goal image this matters less than it looks: the planner compares predicted features
+  with the goal's features and never reads position out. What it needs is that features change
+  predictably with the controller's targets, which is what the predictor will test next.
+
 ## Suggested next steps for the drone world-model plan
 
 1. Wire `load_model("vjepa2_ac_vit_giant")` into an image-goal MPC loop (the energy
