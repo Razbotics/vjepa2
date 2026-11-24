@@ -47,7 +47,8 @@ or build decord against the system ffmpeg.
 
 ## Checkpoints
 
-Downloaded into `checkpoints/` (resumable with `curl -L -C -`):
+Downloaded into `checkpoints/` (resumable with `curl -L -C -`). Since 2026-11-24 they live on the GPU
+desktop only; the Mac keeps none, so anything that loads a model runs on aorus.
 
 | File | Model | Size | Use |
 |---|---|---|---|
