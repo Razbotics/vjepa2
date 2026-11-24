@@ -19,7 +19,8 @@ Probe: ridge regression from features to the measured angle of every joint that 
 blocked cross-validation in time (5 contiguous blocks, a 1 s gap dropped next to each test block) so that
 neighbouring frames never sit on both sides of the split. The ridge strength is chosen on the tail of the
 training part, never on the test block. Baselines: predicting the training mean, and the same ridge on
-raw 32x32 grey pixels.
+raw 32x32 grey pixels. Long runs are probed on at most --probe-max evenly spaced frames (the dual-form
+ridge builds a frames x frames matrix); the 1 s gap is kept in time, not in samples.
 """
 
 import argparse
@@ -129,6 +130,7 @@ def main():
     ap.add_argument("--device", default=None)
     ap.add_argument("--dtype", default="bfloat16", choices=["float32", "bfloat16"])
     ap.add_argument("--probe-only", action="store_true", help="reuse saved features")
+    ap.add_argument("--probe-max", type=int, default=12000, help="probe on at most this many frames")
     args = ap.parse_args()
 
     device = pick_device(args.device)
@@ -147,9 +149,13 @@ def main():
     cols = [meta["joints"].index(j) for j in joints]
     fps = (len(log["t_frame"]) - 1) / (log["t_frame"][-1] - log["t_frame"][0])
 
+    pstride = -(-len(idx) // args.probe_max)
+    pidx = idx[::pstride]
+    if pstride > 1:
+        print(f"probing on every {pstride}th encoded frame: {len(pidx)} frames")
     rows = []
-    g = np.stack([cv2.resize(cv2.imread(files[i], cv2.IMREAD_GRAYSCALE)[:, 140:500], (32, 32)) for i in idx])
-    rows.append(("raw pixels 32x32", g.reshape(len(idx), -1).astype(np.float64), idx))
+    g = np.stack([cv2.resize(cv2.imread(files[i], cv2.IMREAD_GRAYSCALE)[:, 140:500], (32, 32)) for i in pidx])
+    rows.append(("raw pixels 32x32", g.reshape(len(pidx), -1).astype(np.float64), pidx))
     for model in args.models:
         path = os.path.join(args.run, f"feat_{model}.npz")
         if not os.path.exists(path):
@@ -157,8 +163,9 @@ def main():
             continue
         z = np.load(path)
         short = model.replace("vjepa2_1_", "2.1 ").replace("vjepa2_", "2 ").replace("_384", "")
-        rows.append((f"{short} pooled", z["pooled"], z["idx"]))
-        rows.append((f"{short} grid4x4", z["grid"], z["idx"]))
+        keep = np.isin(z["idx"], pidx)
+        rows.append((f"{short} pooled", z["pooled"][keep], z["idx"][keep]))
+        rows.append((f"{short} grid4x4", z["grid"][keep], z["idx"][keep]))
 
     print(f"\n== linear probe, blocked 5-fold CV in time, {len(joints)} joints, angles in degrees")
     y_all = log["pos_deg"][:, cols]

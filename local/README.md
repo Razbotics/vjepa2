@@ -670,6 +670,49 @@ First run (`20261124_132605`, 120 s simulated, 6 joints, R2 / MAE in deg, blocke
 - Wrist flex, wrist roll and gripper are the weak joints: small parts, all black on a dark arm, and their
   effect on the image depends on every joint above them. More data, a larger crop around the gripper, or
   a contrasting gripper colour are the obvious levers; the simulator makes each a one-line test.
+### One hour of simulated data: does more data help?
+
+`hour_seed1`: 3600 s simulated (108,000 frames, 3,455 targets, all six joints, +/-20 deg) in 7.6 min,
+ViT-L encoding 17 min. For long runs `arm_encode.py` probes on at most 12,000 evenly spaced frames and
+`arm_predictor.py` keeps features on the GPU in fp16 (see their `--probe-max`, `--max-test`).
+
+```bash
+~/projects/lerobot/.venv/bin/python -m local.sim_collect --seconds 3600 --seed 1 --out local/data/sim_arm/hour_seed1
+.venv/bin/python -m local.arm_encode local/data/sim_arm/hour_seed1 --models vjepa2_1_vit_large_384
+.venv/bin/python -m local.arm_predictor local/data/sim_arm/hour_seed1 --model vjepa2_1_vit_large_384 --steps 6000 \
+    --train-seconds 600        # omit for all of the training part
+```
+
+Probe on the hour (R2 / MAE deg; compare the 2-minute table above):
+
+| Features | shoulder_pan | shoulder_lift | elbow_flex | wrist_flex | wrist_roll | gripper |
+|---|---|---|---|---|---|---|
+| raw pixels 32x32 | 0.99 / 0.4 | 0.99 / 0.5 | 0.94 / 0.7 | 0.65 / 3.3 | -0.02 / 6.9 | -0.21 / 5.5 |
+| 2.1 ViT-L pooled | 1.00 / 0.5 | 1.00 / 0.6 | 0.99 / 0.7 | 0.97 / 1.6 | 0.91 / 3.1 | 0.79 / 2.1 |
+| 2.1 ViT-L grid4x4 | 1.00 / 0.2 | 1.00 / 0.2 | 1.00 / 0.2 | 1.00 / 0.7 | 0.96 / 1.9 | 0.91 / 1.3 |
+
+Predictor (ViT-L grid, 0.5 s step, 6,000 steps each), trained on the first N seconds; every row is scored
+on the same last 12 minutes (4,000 test starts):
+
+| Training data | Decoded joints, mean | True action top-1 of 64 | Chosen action off by | 2.5 s rollout |
+|---|---|---|---|---|
+| copy (no change) | 1.92 deg | - | - | 4.69 deg |
+| 2 min | 2.14 deg | 14.8% | 1.21 deg | 4.04 deg |
+| 10 min | 1.20 deg | 50.5% | 0.57 deg | 2.21 deg |
+| 48 min | **0.97 deg** | **79.5%** | **0.19 deg** | **1.61 deg** |
+| floor (decode the real future) | 0.85 deg | - | - | - |
+
+- With six joints moving, 2 minutes of data is not enough: the predictor is worse than predicting no
+  change (2.14 vs 1.92 deg) and overfits (its training loss is the lowest of the three). The real-arm run
+  got away with 2 minutes because only four joints moved, in one plane.
+- 10 minutes already beats copy by a wide margin; the full 48 minutes gets within 0.12 deg of the floor,
+  ranks the true action first 80% of the time (chance 1.6%), and a 2.5 s open-loop rollout stays at
+  1.6 deg where copy drifts to 4.7.
+- Per joint at 48 min (deg, predicted / floor): shoulder_pan 0.27 / 0.20, shoulder_lift 0.32 / 0.23,
+  elbow 0.38 / 0.27, wrist_flex 0.96 / 0.78, wrist_roll 2.39 / 2.26, gripper 1.51 / 1.33. What remains is
+  mostly the features' own limit on the wrist roll and gripper, not the predictor.
+- More data also fixed the probe: wrist_flex R2 0.64 -> 1.00, gripper 0.70 -> 0.91.
+
 - Sim images are not real images: features and predictors trained here will not transfer to the C270
   view as they are. Use the simulator to develop methods and answer scaling questions, then confirm on the
   real arm.

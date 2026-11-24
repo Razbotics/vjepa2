@@ -21,6 +21,12 @@ test part. Evaluations:
                        63 other actions from the test set by how close their predicted future lands.
                        Reports how often the true action wins and how far the winner is from it.
   4. rollout           feed predictions back in for 5 steps with the real action sequence.
+
+Long runs (the simulator gives hours): features stay on the GPU in float16 and training batches are
+gathered by index; the evaluations use at most --max-test evenly spaced test starts and the probe is fit
+on at most --probe-max training frames. --train-seconds N trains the predictor on only the first N seconds
+of the training part; the test part, the feature standardization and the probe stay the same, so runs with
+different N are directly comparable (a data-scaling curve). Outputs are tagged _train<N>s.
 """
 
 import argparse
@@ -81,17 +87,17 @@ def make_probe(x, y, lambdas=(0.1, 1.0, 10.0, 100.0, 1000.0)):
     return fit(x, y, lambdas[int(np.argmin(errs))])
 
 
-def train(model, data, steps, batch, lr, noise, device, seed):
-    z, s, a, zn = data
+def train(model, pairs, t_train, steps, batch, lr, noise, device, seed):
+    """pairs(t) -> (z, state, action, next z) for start frames t; t_train holds the allowed starts."""
     g = torch.Generator(device=device).manual_seed(seed)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.05)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, total_steps=steps, pct_start=0.05)
     model.train()
     t0, running = time.perf_counter(), 0.0
     for step in range(1, steps + 1):
-        i = torch.randint(0, len(z), (batch,), device=device, generator=g)
-        zin = z[i] + noise * torch.randn(z[i].shape, device=device, generator=g)
-        loss = F.l1_loss(model(zin, s[i], a[i]), zn[i])
+        z, s, a, zn = pairs(t_train[torch.randint(0, len(t_train), (batch,), device=device, generator=g)])
+        zin = z + noise * torch.randn(z.shape, device=device, generator=g)
+        loss = F.l1_loss(model(zin, s, a), zn)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -119,6 +125,9 @@ def main():
     ap.add_argument("--candidates", type=int, default=64)
     ap.add_argument("--rollout", type=int, default=5)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--train-seconds", type=float, default=None, help="train on only the first N seconds")
+    ap.add_argument("--max-test", type=int, default=4000, help="evaluate on at most this many test starts")
+    ap.add_argument("--probe-max", type=int, default=8000, help="fit the probe on at most this many frames")
     ap.add_argument("--device", default=None)
     args = ap.parse_args()
 
@@ -133,25 +142,38 @@ def main():
     n = len(feat["idx"])
     dim = feat["grid"].shape[1] // 16
     # arm_encode stored the grid as [D, 4, 4] flattened; make it [N, 16 tokens, D]
-    z_all = torch.from_numpy(feat["grid"].astype(np.float32)).reshape(n, dim, 16).transpose(1, 2).to(device)
+    grid = feat["grid"]  # float16 [N, D*16]
     q_all = torch.from_numpy(log["pos_deg"][:, cols].astype(np.float32)).to(device)
     fps = (n - 1) / float(log["t_frame"][-1] - log["t_frame"][0])
     k, gap = args.k, int(round(fps))
 
     split = int(n * 0.8)
-    tr_t = torch.arange(0, split - gap - k, device=device)
+    tr_end = split - gap - k
+    if args.train_seconds is not None:
+        tr_end = min(tr_end, int(round(args.train_seconds * fps)))
+    tr_t = torch.arange(0, tr_end, device=device)
     te_t = torch.arange(split, n - k * args.rollout, device=device)
-    zmu = z_all[: split - gap].mean(dim=(0, 1), keepdim=True)
-    zsd = z_all[: split - gap].std(dim=(0, 1), keepdim=True).clamp_min(1e-6)
-    z_all = (z_all - zmu) / zsd
+    if len(te_t) > args.max_test:
+        te_t = te_t[torch.linspace(0, len(te_t) - 1, args.max_test, device=device).long()]
+    # standardization from the whole training part (a subsample is plenty for a mean and std)
+    sub = torch.from_numpy(grid[: split - gap : max(1, (split - gap) // 5000)].astype(np.float32))
+    sub = sub.reshape(len(sub), dim, 16).transpose(1, 2)
+    zmu = sub.mean(dim=(0, 1), keepdim=True).to(device)
+    zsd = sub.std(dim=(0, 1), keepdim=True).clamp_min(1e-6).to(device)
+    z_all = torch.empty(n, 16, dim, dtype=torch.float16, device=device)
+    for c in range(0, n, 4096):
+        zc = torch.from_numpy(grid[c : c + 4096].astype(np.float32)).to(device).reshape(-1, dim, 16).transpose(1, 2)
+        z_all[c : c + 4096] = ((zc - zmu) / zsd).half()
+    del grid, sub
     qmu, qsd = q_all[: split - gap].mean(0, keepdim=True), q_all[: split - gap].std(0, keepdim=True)
     s_all = (q_all - qmu) / qsd
 
     def pairs(t, step=k):
-        return z_all[t], s_all[t], (q_all[t + step] - q_all[t]) / qsd, z_all[t + step]
+        return z_all[t].float(), s_all[t], (q_all[t + step] - q_all[t]) / qsd, z_all[t + step].float()
 
     print(f"run {args.run} | {args.model} dim {dim} | {n} frames at {fps:.1f} Hz | step {k} frames = {k / fps:.2f} s")
-    print(f"train pairs {len(tr_t)} ({len(tr_t) / fps:.0f} s)  test pairs {len(te_t)} ({len(te_t) / fps:.0f} s)")
+    test_s = (n - split) / fps
+    print(f"train pairs {len(tr_t)} ({len(tr_t) / fps:.0f} s)  test starts {len(te_t)} in the last {test_s:.0f} s")
     da = (q_all[te_t + k] - q_all[te_t]).abs()
     print("joints " + ", ".join(joints))
     print("mean |joint change| per step on test (deg): " + "  ".join(f"{v:.2f}" for v in da.mean(0).tolist()))
@@ -162,11 +184,12 @@ def main():
         m = Predictor(dim, len(joints), args.width, args.depth, use_action=use_action).to(device)
         if name == "with actions":
             print(f"    {sum(p.numel() for p in m.parameters()) / 1e6:.1f}M parameters")
-        models[name] = train(m, pairs(tr_t), args.steps, args.batch, args.lr, args.noise, device, args.seed)
+        models[name] = train(m, pairs, tr_t, args.steps, args.batch, args.lr, args.noise, device, args.seed)
     model = models["with actions"]
 
-    probe = make_probe(z_all[: split - gap].flatten(1), q_all[: split - gap])
-    res = {"joints": joints, "model": args.model, "k": k}
+    pt = torch.arange(0, split - gap, max(1, (split - gap) // args.probe_max), device=device)
+    probe = make_probe(z_all[pt].float().flatten(1), q_all[pt])
+    res = {"joints": joints, "model": args.model, "k": k, "train_pairs": len(tr_t), "test_starts": len(te_t)}
     with torch.inference_mode():
         z, s, a, zn = pairs(te_t)
         q_next = q_all[te_t + k]
@@ -218,21 +241,22 @@ def main():
             act = (q_all[t1] - q_all[t0]) / qsd
             zc = model(zc, sc, act)
             sc = s_all[t1]  # equals previous state + action, because actions are measured joint deltas
-            real = z_all[t1]
+            real = z_all[t1].float()
             l1, l1c = F.l1_loss(zc, real).item(), F.l1_loss(z, real).item()
             dm = (probe(zc.flatten(1)) - q_all[t1]).abs().mean().item()
             dc = (probe(z.flatten(1)) - q_all[t1]).abs().mean().item()
             res[f"rollout/{step}"] = {"l1": l1, "l1_copy": l1c, "decoded_mae": dm, "decoded_mae_copy": dc}
             print(f"  step {step}: feature L1 {l1:.4f} (copy {l1c:.4f})   decoded joints {dm:.2f} deg (copy {dc:.2f})")
 
+    tag = args.model + (f"_train{args.train_seconds:g}s" if args.train_seconds is not None else "")
     torch.save(
         {"state_dict": model.state_dict(), "args": vars(args), "joints": joints, "zmu": zmu.cpu(), "zsd": zsd.cpu(),
          "qmu": qmu.cpu(), "qsd": qsd.cpu()},
-        os.path.join(args.run, f"pred_{args.model}.pt"),
+        os.path.join(args.run, f"pred_{tag}.pt"),
     )
-    with open(os.path.join(args.run, f"pred_{args.model}.json"), "w") as f:
+    with open(os.path.join(args.run, f"pred_{tag}.json"), "w") as f:
         json.dump(res, f, indent=2)
-    print(f"\nsaved pred_{args.model}.pt and .json in {args.run}")
+    print(f"\nsaved pred_{tag}.pt and .json in {args.run}")
 
 
 if __name__ == "__main__":
