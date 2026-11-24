@@ -942,6 +942,52 @@ Reading:
   on the frame pair (now, 0.5 s later) could not read the step's motion even from real frames either; it
   was dropped.
 
+### Closed-loop flight to a goal image in simulation
+
+`drone_plan.py` is the drone's `sim_plan.py`. Each episode records the onboard view at a random free spot
+(the goal), moves the drone 0.3-0.8 m away and turns it up to 30 deg (so the views overlap), then gives it
+20 steps of 0.5 s. Each step it encodes the onboard frame, searches two-step action sequences through the
+predictor, and moves the controller target by the first action. The planner sees only images and its
+onboard state; the goal's position is kept for scoring. Episodes depend only on `--seed` (100, unseen).
+
+```bash
+~/projects/lerobot/.venv/bin/python -m local.drone_plan local/data/sim_drone/hour_seed1 [--policy random] [--video 3]
+```
+
+| Policy (same 20 episodes) | Distance to goal | Heading error | Ends within 20 cm and 15 deg | Got closer |
+|---|---|---|---|---|
+| Planning | 58 -> **35 cm** (median 32; closest on the way 18) | 12.5 -> **4.8 deg** | **6 of 20** | **16 of 20** |
+| Random actions | 58 -> 110 cm (median 91) | 12.5 -> 36.5 deg | 0 of 20 | 5 of 20 |
+
+Planning takes 75 ms a step on the 4060 Ti (ViT-L encode plus 4 x 256 two-step predictions).
+
+Getting the search right took two fixes, both found by putting the drone exactly at its goal and asking
+what the planner wants to do there (the energy landscape itself was fine: lowest for "stay", rising
+smoothly with any move):
+
+1. **Score every step, not only the last.** With the arm's energy (L1 after the last step only), "go
+   forward, then come back" ties with "stay", so the executed first action was nearly arbitrary; the drone
+   reached the goal (11-19 cm) and flew on through it, ending further away than it started (64 -> 101 cm in
+   a 4-episode trial).
+2. **Keep the best plan; do not average the elites.** Plain CEM recentres on the mean of the 24 best
+   samples. Here the good region is a narrow valley in 8 dimensions (2 steps x 4 actions); the best samples
+   scatter along its sides and their mean lands on a slope. At the goal, rounds went 0.11 -> 0.51 -> 0.66
+   in energy while "stay" scored 0.11. The search now keeps the best sequence found and samples around it
+   with a spread halving each round; "stay" and the previous step's plan (shifted by one) are always
+   candidates. (The arm's planner kept plain CEM, whose landscape is smoother.)
+
+Reading:
+
+- Heading is the easy part (4.8 deg, most episodes under 4 deg). Distance is harder: the drone gets within
+  18 cm on the way on average but ends at 35 cm, so it still wanders near the goal.
+- Several goals face a wall from up close (rows 2, 3 and 5 of the montage): the goal image is mostly
+  checker, which pins heading but says little about distance along the wall. That is a likely cause of
+  error, but not the only one: of the first six episodes, two that face the open room also end 38-41 cm
+  away. Not yet measured across all 20.
+- Next levers: goals that see the room rather than a wall, a longer horizon or a final-step weight, and
+  more data for the predictor (the arm's planning stopped improving after 10 min of data; the drone's has
+  not been measured).
+
 ## Suggested next steps for the drone world-model plan
 
 1. Wire `load_model("vjepa2_ac_vit_giant")` into an image-goal MPC loop (the energy
