@@ -763,7 +763,9 @@ wrist_flex 9.3 -> 1.9, wrist_roll 14.7 -> 9.7, gripper 5.9 -> 3.2. Planning take
 ## Simulated Crazyflie 2 (MuJoCo)
 
 `sim_drone.py` flies MuJoCo Menagerie's `bitcraze_crazyflie_2` (27 g, commit eea4c74) in a 6 x 6 m room
-with checkered floor and walls, coloured pillars and boxes, so an onboard camera has something to see.
+with a checkered floor, a ceiling, four walls each with its own checker colours, and coloured pillars and
+boxes, so the onboard camera always has texture to see motion in (an earlier version with a plain gradient
+wall and no ceiling gave near-blank and half-black frames).
 
 ```bash
 ~/projects/lerobot/.venv/bin/python -m local.sim_drone [--video]     # flight test: numbers, views.jpg, flight.mp4
@@ -782,7 +784,8 @@ Changes to the Menagerie model, made when the scene is built (the asset files ar
   field of view. `track` (Menagerie's chase camera, 1 m behind, follows position not heading) and a fixed
   `corner` camera are also available.
 
-Control runs every physics step (500 Hz): a position PD loop with velocity feed-forward and a 30 deg lean
+Control runs every physics step (1/510 s, so 17 steps make exactly one 30 fps frame): a position PD loop
+with velocity and acceleration feed-forward and a 30 deg lean
 limit gives the desired thrust vector, a geometric attitude loop (Lee, Leok and McClamroch 2010) gives body
 torques, and the mixer solves the four rotor thrusts. A learned planner will later set this controller's
 targets, not the rotor thrusts: a quadrotor does not stay upright by itself, so a fast loop must run
@@ -801,10 +804,46 @@ fly a 1 m square at 0.5 m/s, turn 90 deg, take a 0.05 N sideways shove for 0.1 s
 
 Hover holds position to 0.3 mm RMS, and the hover thrust per rotor (0.0662 N) equals a quarter of the
 weight. The turn ends at 90.0 deg, and the drone settles back to its 1.2 cm resting height. The 5 cm error
-while flying the square is lag behind the moving target (PD only, no integral term or acceleration
-feed-forward), and the 14 deg lean comes at the start and end of each leg, where the target's velocity
-steps between 0 and 0.5 m/s. Rotors never get near 0 or the 0.15 N limit, so there is headroom for faster
-flight.
+while flying the square is lag behind the moving target (the test's straight legs jump between 0 and
+0.5 m/s, so there is no acceleration to feed forward), and the 14 deg lean comes at those jumps. Rotors never
+get near 0 or the 0.15 N limit, so there is headroom for faster flight.
+
+### Collecting onboard-camera flight data
+
+`sim_drone_collect.py` is the drone's `sim_collect.py`: a random walk of waypoints, logged every frame.
+
+```bash
+~/projects/lerobot/.venv/bin/python -m local.sim_drone_collect --seconds 3600 --seed 1 \
+    --out local/data/sim_drone/hour_seed1
+```
+
+- Each waypoint is a position and heading at most 0.8 m (per horizontal axis), 0.3 m vertically and 45 deg
+  of turn from the last; it stays 0.5 m from the walls, between 0.3 and 2.0 m up, and the straight path to it
+  keeps 0.3 m from every pillar and box, or it is drawn again.
+- The target slides there along a minimum-jerk profile (smooth start and stop) at an average 0.2-0.8 m/s,
+  turning at up to 60 deg/s on average, then holds for 0-0.5 s. Feeding the profile's acceleration forward
+  cut the tracking error from 9.6 to 2.9 cm mean (15.8 cm max) in a 2-minute trial.
+- Logged per frame: onboard image (640x360 JPEG), position, attitude (quaternion and roll/pitch/yaw),
+  velocity, body rates, the controller's target (`ref_pos`, `ref_vel`, `ref_acc`, `ref_yaw`), the waypoint,
+  rotor thrusts, and `segment`, which increments if the drone ever touches something and is reset to hover
+  (training pairs should not straddle a reset). The world model's actions will come from the target, not
+  the rotor thrusts.
+
+**One hour, `hour_seed1`** (headless on aorus): 108,000 frames (3.1 GB), simulated in 13.4 min (134 fps; the
+2-minute trial ran at 203 fps, the long run is slowed by writing the JPEGs), 2,183 waypoints, **no contacts
+and no resets** (one segment).
+
+| | |
+|---|---|
+| Area covered | x and y -2.54..+2.54 m (99 of the 100 half-metre cells in the 5 x 5 m flight area), z 0.19-2.00 m (median 1.15) |
+| Heading | all directions; the eight 45 deg sectors hold 10-16% of frames each |
+| Motion per 0.5 s | 19.4 cm and 7.1 deg on average; still 4% of the time |
+| Speed | mean 0.41, max 1.78 m/s |
+| Tilt | mean 6.9, max 35.3 deg |
+| Tracking error | mean 2.6, max 24.5 cm |
+
+The lowest point (0.19 m) is under the 0.3 m waypoint floor: on fast descents the drone sinks a little below
+its target. It never touched the floor.
 
 ## Suggested next steps for the drone world-model plan
 
