@@ -726,6 +726,13 @@ faces the same 20 episodes.
 ~/projects/lerobot/.venv/bin/python -m local.sim_plan local/data/sim_arm/hour_seed1 [--pred train600s] [--policy random]
 ```
 
+Add `--view` to watch it in MuJoCo's viewer at real-time speed. The goal pose is drawn as a see-through
+green ghost arm, and the top-left text shows the episode, step and tip distance. The ghost lives only in the
+viewer's extra scene (`user_scn`); the planner's camera renders its own scene, so it never sees the ghost
+and the results are those of a plain run. Closing the window stops the run and reports the finished
+episodes. To show it on the desktop's screen from the laptop, launch it over SSH with
+`DISPLAY=:0 XAUTHORITY=/run/user/1000/gdm/Xauthority`, as for `sim_view.py`.
+
 | Policy | Joint error, mean | Gripper tip | Ends within 2 cm | Got closer |
 |---|---|---|---|---|
 | Planning, predictor on 48 min | 11.1 -> **3.2 deg** | 9.7 -> **2.1 cm** | 11 of 20 | 20 of 20 |
