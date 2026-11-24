@@ -646,6 +646,15 @@ git -C mujoco_menagerie sparse-checkout set skydio_x2 bitcraze_crazyflie_2
 .venv/bin/python -m local.arm_encode local/data/sim_arm/<ts> --models vjepa2_1_vit_base_384 vjepa2_1_vit_large_384
 ```
 
+Interactive viewer (`sim_view.py`): the same scene in MuJoCo's window, starting on the dataset camera's
+side view. `--demo` runs the random walk; without it, the "Control" panel's sliders set each servo goal.
+To open it on the desktop's own screen from the laptop (someone logged in there):
+
+```bash
+ssh aorus 'cd projects/vjepa2 && DISPLAY=:0 XAUTHORITY=/run/user/1000/gdm/Xauthority \
+  nohup ~/projects/lerobot/.venv/bin/python -m local.sim_view --demo > /tmp/sim_view.log 2>&1 &'
+```
+
 First run (`20261124_132605`, 120 s simulated, 6 joints, R2 / MAE in deg, blocked 5-fold CV in time):
 
 | Features | shoulder_pan | shoulder_lift | elbow_flex | wrist_flex | wrist_roll | gripper |

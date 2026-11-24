@@ -42,37 +42,45 @@ CAMERA = {"lookat": [0.17, 0.0, 0.09], "distance": 0.62, "azimuth": -90.0, "elev
 SUBSTEPS = 20
 
 
+def build_model(assets=ASSETS, fps=30.0, camera=None, kp=17.8, arm_rgba=(0.08, 0.08, 0.09, 1)):
+    """The maker's SO-101 plus table, lamp and side-camera settings. Returns (model, camera dict)."""
+    spec = mujoco.MjSpec.from_file(os.path.join(assets, SO101_XML))
+    if arm_rgba is not None:  # the real arm is printed in black
+        for mat in spec.materials:
+            mat.rgba = arm_rgba
+    spec.add_texture(
+        name="sky",
+        type=mujoco.mjtTexture.mjTEXTURE_SKYBOX,
+        builtin=mujoco.mjtBuiltin.mjBUILTIN_FLAT,
+        rgb1=[0.75, 0.75, 0.75],
+        rgb2=[0.75, 0.75, 0.75],
+        width=64,
+        height=384,
+    )
+    world = spec.worldbody
+    world.add_geom(name="floor", type=mujoco.mjtGeom.mjGEOM_PLANE, size=[0, 0, 0.05], pos=[0, 0, -0.02],
+                   rgba=[0.55, 0.55, 0.55, 1], contype=0, conaffinity=0)
+    world.add_geom(name="table", type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.35, 0.3, 0.01], pos=[0.2, 0, -0.01],
+                   rgba=[0.9, 0.88, 0.84, 1], contype=0, conaffinity=0)
+    world.add_light(name="lamp", pos=[0.2, -0.3, 1.2], dir=[0, 0.2, -1], castshadow=True)
+    model = spec.compile()
+    model.opt.timestep = 1.0 / (fps * SUBSTEPS)
+    if kp is not None:  # position actuator: force = kp * (goal - q) - kv * qvel
+        model.actuator_gainprm[:, 0] = kp
+        model.actuator_biasprm[:, 1] = -kp
+    cam = dict(CAMERA, **(camera or {}))
+    model.vis.global_.fovy = cam["fovy"]
+    model.vis.headlight.ambient[:] = 0.35
+    model.vis.headlight.diffuse[:] = 0.45
+    names = [model.joint(i).name for i in range(model.njnt)]
+    assert names == JOINTS and model.nu == len(JOINTS), f"unexpected model joints {names}"
+    return model, cam
+
+
 class SimArm:
     def __init__(self, assets=ASSETS, width=640, height=360, fps=30.0, camera=None, kp=17.8,
                  arm_rgba=(0.08, 0.08, 0.09, 1)):
-        spec = mujoco.MjSpec.from_file(os.path.join(assets, SO101_XML))
-        if arm_rgba is not None:  # the real arm is printed in black
-            for mat in spec.materials:
-                mat.rgba = arm_rgba
-        spec.add_texture(
-            name="sky",
-            type=mujoco.mjtTexture.mjTEXTURE_SKYBOX,
-            builtin=mujoco.mjtBuiltin.mjBUILTIN_FLAT,
-            rgb1=[0.75, 0.75, 0.75],
-            rgb2=[0.75, 0.75, 0.75],
-            width=64,
-            height=384,
-        )
-        world = spec.worldbody
-        world.add_geom(name="floor", type=mujoco.mjtGeom.mjGEOM_PLANE, size=[0, 0, 0.05], pos=[0, 0, -0.02],
-                       rgba=[0.55, 0.55, 0.55, 1], contype=0, conaffinity=0)
-        world.add_geom(name="table", type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.35, 0.3, 0.01], pos=[0.2, 0, -0.01],
-                       rgba=[0.9, 0.88, 0.84, 1], contype=0, conaffinity=0)
-        world.add_light(name="lamp", pos=[0.2, -0.3, 1.2], dir=[0, 0.2, -1], castshadow=True)
-        self.model = spec.compile()
-        self.model.opt.timestep = 1.0 / (fps * SUBSTEPS)
-        if kp is not None:  # position actuator: force = kp * (goal - q) - kv * qvel
-            self.model.actuator_gainprm[:, 0] = kp
-            self.model.actuator_biasprm[:, 1] = -kp
-        cam = dict(CAMERA, **(camera or {}))
-        self.model.vis.global_.fovy = cam["fovy"]
-        self.model.vis.headlight.ambient[:] = 0.35
-        self.model.vis.headlight.diffuse[:] = 0.45
+        self.model, cam = build_model(assets, fps, camera, kp, arm_rgba)
         self.data = mujoco.MjData(self.model)
         self._scratch = mujoco.MjData(self.model)  # for kinematics that must not disturb the simulation
         self.cam = mujoco.MjvCamera()
@@ -81,8 +89,6 @@ class SimArm:
         self.renderer = mujoco.Renderer(self.model, height=height, width=width)
         self.fps = fps
         self.ready = np.array(READY_DEG)
-        names = [self.model.joint(i).name for i in range(self.model.njnt)]
-        assert names == JOINTS and self.model.nu == len(JOINTS), f"unexpected model joints {names}"
         self.range_deg = np.degrees(self.model.jnt_range)  # [6, 2]
         self._tip = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "gripperframe")
 

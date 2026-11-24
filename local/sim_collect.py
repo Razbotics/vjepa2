@@ -85,7 +85,8 @@ def main():
                 target_id, dwell_left = target_id + 1, args.dwell
         goal = goal + np.clip(target - goal, -step, step)
         arm.step(goal)
-        cv2.imwrite(os.path.join(out, "frames", f"{i:06d}.jpg"), arm.render(), [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality])
+        path = os.path.join(out, "frames", f"{i:06d}.jpg")
+        cv2.imwrite(path, arm.render(), [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality])
         log["t_frame"].append(arm.t)
         log["pos_deg"].append(arm.q_deg)
         log["goal_deg"].append(goal.copy())
@@ -119,7 +120,8 @@ def main():
     print(f"{'joint':<14}{'min':>8}{'max':>8}{'goal err mean':>15}{'max':>7}   (deg)")
     for k, j in enumerate(JOINTS):
         print(f"{j:<14}{q[:, k].min():>8.1f}{q[:, k].max():>8.1f}{err[:, k].mean():>15.2f}{err[:, k].max():>7.2f}")
-    print(f"peak torque {np.abs(arrays['torque']).max():.2f} N m (limit 3.35), lowest tip {arrays['tip'][:, 2].min():.3f} m")
+    peak, low = np.abs(arrays["torque"]).max(), arrays["tip"][:, 2].min()
+    print(f"peak torque {peak:.2f} N m (limit 3.35), lowest tip {low:.3f} m")
     if rejected:
         print(f"{rejected} targets fell back to the ready pose (no safe target found)")
     print(f"-> {out}")
