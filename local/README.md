@@ -760,6 +760,52 @@ wrist_flex 9.3 -> 1.9, wrist_roll 14.7 -> 9.7, gripper 5.9 -> 3.2. Planning take
   view as they are. Use the simulator to develop methods and answer scaling questions, then confirm on the
   real arm.
 
+## Simulated Crazyflie 2 (MuJoCo)
+
+`sim_drone.py` flies MuJoCo Menagerie's `bitcraze_crazyflie_2` (27 g, commit eea4c74) in a 6 x 6 m room
+with checkered floor and walls, coloured pillars and boxes, so an onboard camera has something to see.
+
+```bash
+~/projects/lerobot/.venv/bin/python -m local.sim_drone [--video]     # flight test: numbers, views.jpg, flight.mp4
+ssh aorus 'cd projects/vjepa2 && DISPLAY=:0 XAUTHORITY=/run/user/1000/gdm/Xauthority nohup \
+    ~/projects/lerobot/.venv/bin/python -m local.sim_drone --view --loop > /tmp/sim_drone_view.log 2>&1 &'
+```
+
+Changes to the Menagerie model, made when the scene is built (the asset files are untouched):
+
+- **Rotors instead of body torques.** Menagerie drives the body with one thrust and three torque
+  actuators whose torque tops out at 1e-5 N m: 0.4 rad/s^2 of roll acceleration, about 1/1000 of the real
+  drone. They are replaced by four rotors at the tips of the 92 mm (motor to motor) X frame, 0.15 N each
+  (thrust-to-weight 2.3), with a drag torque of 0.006 N m per N of thrust, alternating in sign, and a
+  30 ms first-order spin-up lag. A rotor's command is its thrust in newtons.
+- **Onboard camera** `fpv`: 2 cm ahead of the centre, looking forward, pitched 15 deg down, 70 deg vertical
+  field of view. `track` (Menagerie's chase camera, 1 m behind, follows position not heading) and a fixed
+  `corner` camera are also available.
+
+Control runs every physics step (500 Hz): a position PD loop with velocity feed-forward and a 30 deg lean
+limit gives the desired thrust vector, a geometric attitude loop (Lee, Leok and McClamroch 2010) gives body
+torques, and the mixer solves the four rotor thrusts. A learned planner will later set this controller's
+targets, not the rotor thrusts: a quadrotor does not stay upright by itself, so a fast loop must run
+underneath whatever the world model decides.
+
+Test flight (27 s of simulated flight in 2 s of wall time, rendering two cameras at 30 fps): take off to 1 m,
+fly a 1 m square at 0.5 m/s, turn 90 deg, take a 0.05 N sideways shove for 0.1 s, land.
+
+| Leg | Tracking error, mean / max | Max tilt | Rotor thrusts |
+|---|---|---|---|
+| Take off and hover | 2.4 / 9.4 cm | 0 deg | 0.049-0.085 N |
+| Each side of the square | 5.4 / 10.6 cm | 14 deg | 0.057-0.076 N |
+| Turn 90 deg | 0.4 / 3.4 cm | 1 deg | 0.060-0.072 N |
+| Shove | 1.5 / 5.5 cm | 7 deg | 0.062-0.071 N |
+| Land | 2.2 / 7.6 cm | 0 deg | 0.049-0.083 N |
+
+Hover holds position to 0.3 mm RMS, and the hover thrust per rotor (0.0662 N) equals a quarter of the
+weight. The turn ends at 90.0 deg, and the drone settles back to its 1.2 cm resting height. The 5 cm error
+while flying the square is lag behind the moving target (PD only, no integral term or acceleration
+feed-forward), and the 14 deg lean comes at the start and end of each leg, where the target's velocity
+steps between 0 and 0.5 m/s. Rotors never get near 0 or the 0.15 N limit, so there is headroom for faster
+flight.
+
 ## Suggested next steps for the drone world-model plan
 
 1. Wire `load_model("vjepa2_ac_vit_giant")` into an image-goal MPC loop (the energy
