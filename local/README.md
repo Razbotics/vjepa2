@@ -611,6 +611,60 @@ start -> after 7 s:
 - Limits: 9 planning episodes, goals drawn from the same +/-10 deg box as the training data, same scene
   and lighting as training, four joints in one plane.
 
+## Simulated SO-101 (MuJoCo)
+
+The same arm in simulation, to get hours of data with all six joints moving at no risk to the hardware,
+and later to add a quadrotor (MuJoCo Menagerie's `skydio_x2` and `bitcraze_crazyflie_2` are already
+fetched next to the arm model). Runs in the LeRobot env on aorus and renders headless on the GPU (EGL).
+
+Setup on aorus (done once):
+
+```bash
+uv pip install --python ~/projects/lerobot/.venv/bin/python mujoco     # 4.0.1
+mkdir -p ~/projects/sim_assets && cd ~/projects/sim_assets
+git clone --depth 1 --filter=blob:none --sparse https://github.com/TheRobotStudio/SO-ARM100.git
+git -C SO-ARM100 sparse-checkout set Simulation/SO101
+git clone --depth 1 --filter=blob:none --sparse https://github.com/google-deepmind/mujoco_menagerie.git
+git -C mujoco_menagerie sparse-checkout set skydio_x2 bitcraze_crazyflie_2
+```
+
+- `sim_arm.py`: `SimArm` loads the maker's MJCF unchanged and adds a table, a lamp and a side camera
+  framed like the real C270 (640x360, base on the right). The arm is recoloured black like the printed
+  one. Joint angles use the same zero-at-range-middle convention and signs as `arm_collect.py`'s degrees,
+  except the gripper, which is the jaw angle in degrees here.
+- Servo stiffness is set to the maker's measured STS3215 value (kp 17.8 N m/rad, from
+  `joints_properties.xml`); the MJCF's actuators ship at 998, which would make the arm unrealistically
+  stiff. With 17.8 a loaded joint lags its goal by about 1 deg, close to the real arm's sag.
+- `sim_collect.py`: the same random walk as `arm_collect.py`, writing the same `frames/` + `log.npz` +
+  `meta.json` layout to `local/data/sim_arm/<ts>`, so `arm_encode.py` and `arm_predictor.py` run on it
+  unchanged. All six joints move, +/-20 deg around the ready pose, targets rejected if the gripper would
+  come within 3 cm of the table. 367 fps including rendering and JPEG writing: an hour of data in under
+  3 minutes.
+
+```bash
+~/projects/lerobot/.venv/bin/python -m local.sim_collect --seconds 120
+.venv/bin/python -m local.arm_encode local/data/sim_arm/<ts> --models vjepa2_1_vit_base_384 vjepa2_1_vit_large_384
+```
+
+First run (`20261124_132605`, 120 s simulated, 6 joints, R2 / MAE in deg, blocked 5-fold CV in time):
+
+| Features | shoulder_pan | shoulder_lift | elbow_flex | wrist_flex | wrist_roll | gripper |
+|---|---|---|---|---|---|---|
+| joint range | 39.9 | 40.3 | 39.5 | 39.0 | 37.8 | 19.9 |
+| raw pixels 32x32 | 0.76 / 5.1 | 0.76 / 5.6 | -1.67 / 6.2 | -0.32 / 8.9 | 0.25 / 6.8 | 0.13 / 4.6 |
+| 2.1 ViT-B grid4x4 | 0.99 / 0.7 | 0.98 / 1.2 | 0.95 / 1.5 | 0.63 / 4.4 | 0.50 / 4.9 | 0.72 / 2.4 |
+| 2.1 ViT-L grid4x4 | 0.99 / 0.7 | 0.99 / 1.1 | 0.96 / 1.3 | 0.64 / 4.0 | 0.63 / 4.4 | 0.70 / 2.5 |
+
+- With six joints moving at once, raw pixels fail on everything past the shoulder, while encoder features
+  still read the shoulder and elbow almost exactly. Compare the real run, where four joints moved and raw
+  pixels got elbow and wrist flex to R2 0.99.
+- Wrist flex, wrist roll and gripper are the weak joints: small parts, all black on a dark arm, and their
+  effect on the image depends on every joint above them. More data, a larger crop around the gripper, or
+  a contrasting gripper colour are the obvious levers; the simulator makes each a one-line test.
+- Sim images are not real images: features and predictors trained here will not transfer to the C270
+  view as they are. Use the simulator to develop methods and answer scaling questions, then confirm on the
+  real arm.
+
 ## Suggested next steps for the drone world-model plan
 
 1. Wire `load_model("vjepa2_ac_vit_giant")` into an image-goal MPC loop (the energy
