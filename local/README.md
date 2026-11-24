@@ -783,6 +783,10 @@ Changes to the Menagerie model, made when the scene is built (the asset files ar
 - **Onboard camera** `fpv`: 2 cm ahead of the centre, looking forward, pitched 15 deg down, 70 deg vertical
   field of view. `track` (Menagerie's chase camera, 1 m behind, follows position not heading) and a fixed
   `corner` camera are also available.
+- **Gimbal camera** `fpv_level` (`render("fpv_level")`): the same mount, lens and 15 deg downward pitch, but
+  it keeps only the drone's heading, as if on an ideal two-axis gimbal, so roll and pitch don't move the
+  view. At a level hover it gives the same image as `fpv`. The planner needs it; see "Fixing the drift"
+  below.
 
 Control runs every physics step (1/510 s, so 17 steps make exactly one 30 fps frame): a position PD loop
 with velocity and acceleration feed-forward and a 30 deg lean
@@ -844,6 +848,15 @@ and no resets** (one segment).
 
 The lowest point (0.19 m) is under the 0.3 m waypoint floor: on fast descents the drone sinks a little below
 its target. It never touched the floor.
+
+`--camera fpv_level` records with the gimbal camera instead. An existing run can be rendered again from its
+logged poses (the flight is identical; only the images change), which is how `hour_seed1_level` was made
+from `hour_seed1` (5 min):
+
+```bash
+~/projects/lerobot/.venv/bin/python -m local.sim_drone_rerender local/data/sim_drone/hour_seed1 \
+    local/data/sim_drone/hour_seed1_level --camera fpv_level
+```
 
 ### Do the encoder features carry the drone's pose?
 
@@ -951,12 +964,15 @@ predictor, and moves the controller target by the first action. The planner sees
 onboard state; the goal's position is kept for scoring. Episodes depend only on `--seed` (100, unseen).
 
 ```bash
-~/projects/lerobot/.venv/bin/python -m local.drone_plan local/data/sim_drone/hour_seed1 [--policy random] [--video 3]
+~/projects/lerobot/.venv/bin/python -m local.drone_plan local/data/sim_drone/hour_seed1_level [--policy random] [--video 3]
 ```
+
+The planner flies with the camera the run was recorded with (`meta["camera"]["name"]`).
 
 | Policy (same 20 episodes) | Distance to goal | Heading error | Ends within 20 cm and 15 deg | Got closer |
 |---|---|---|---|---|
-| Planning | 58 -> **35 cm** (median 32; closest on the way 18) | 12.5 -> **4.8 deg** | **6 of 20** | **16 of 20** |
+| **Planning, gimbal camera** (`hour_seed1_level`) | 58 -> **13.5 cm** (median **8.8**; closest on the way 4.1) | 12.5 -> **2.4 deg** | **17 of 20** | **19 of 20** |
+| Planning, body camera (`hour_seed1`) | 58 -> 35 cm (median 32; closest on the way 18) | 12.5 -> 4.8 deg | 6 of 20 | 16 of 20 |
 | Random actions | 58 -> 110 cm (median 91) | 12.5 -> 36.5 deg | 0 of 20 | 5 of 20 |
 
 Planning takes 75 ms a step on the 4060 Ti (ViT-L encode plus 4 x 256 two-step predictions).
@@ -976,17 +992,58 @@ smoothly with any move):
    with a spread halving each round; "stay" and the previous step's plan (shifted by one) are always
    candidates. (The arm's planner kept plain CEM, whose landscape is smoother.)
 
+#### Fixing the drift: a gimbal camera
+
+With the body-fixed camera the drone got within 18 cm on average but ended at 35 cm. It wandered near the
+goal and sometimes left a good spot (one episode went from 4 to 48 cm). Three measurements located the cause.
+Around 10 goals, the drone hovered level at the goal heading on rings 10-50 cm out:
+
+1. **The image score is fine.** The true energy (real view against the goal view) rises with each ring
+   90-100% of the time: 0.27 at 10 cm, 0.36 at 20, 0.42 at 30, 0.50 at 50.
+2. **The planner doesn't move.** From rest it commanded 0.1 cm at 10 cm and 3 cm at 20 cm, in random
+   directions (cosine with the way to the goal about 0).
+3. **The predictor is why.** Scoring three hand-made actions through it, "fly exactly to the goal" from
+   10 cm came out at 0.64, worse than "stay" (0.26) and level with "fly away" (0.63). It beat "stay" in
+   0% of cases at 10 cm, 1% at 20 cm and 6% at 30 cm.
+
+Flying that move for real showed why the predictor was so pessimistic. After the 0.5 s step the drone is
+3.7 cm from the goal but still tilted 1-1.5 deg and settling, and the true energy is only 0.237 (from 0.270).
+About **1 deg of tilt costs as much energy as 10 cm of position**, and a body-fixed camera is never level
+right after a move. So each step's outcome depends on transient attitude, which the predictor gets to only
+2.2 deg (its test error): any move looks uncertain, only "stay" is predicted sharply, and "stay" wins. At
+50 cm a real "toward" step even raised the true energy (0.48 -> 0.52, at 6 deg of tilt).
+
+A stop-and-go step (min-jerk to rest within 0.5 s) made it worse: braking leaves the drone tilted 20-35 deg
+at the end of the step. Removing attitude from the image fixed it. `fpv_level` is the same camera on an
+ideal gimbal, as real camera drones have (or as software de-rotation from the IMU attitude would do, with a
+small crop). Then a frame depends only on position and heading, which the action controls closely. The
+hour was re-rendered from its logged poses, encoded and the predictor retrained (same settings):
+
+| From rest, `fpv` -> `fpv_level` | 10 cm | 20 cm | 30 cm | 50 cm |
+|---|---|---|---|---|
+| True energy after a real "toward" step (start 0.27 / 0.35 / 0.41 / 0.48) | 0.237 -> **0.185** | 0.326 -> **0.245** | 0.400 -> **0.295** | 0.521 -> **0.354** |
+| Predictor: "toward" beats "stay" | 0% -> **62%** | 1% -> **83%** | 6% -> **91%** | 70% -> **84%** |
+| Planner's move | 0.1 -> 5.6 cm | 3.2 -> 13.0 cm | 9.0 -> 21.3 cm | 17.8 -> 32.8 cm |
+| Planner's move toward the goal (cosine) | -0.04 -> **+0.57** | +0.01 -> **+0.65** | +0.04 -> **+0.77** | +0.28 -> **+0.82** |
+
+The retrained predictor is also better on held-out time: feature error 0.277 (copy 0.451), and its best of 64
+candidates is off by 4.3 cm and 1.3 deg (was 5.0 cm and 1.7 deg). The pose probe confirms that the gimbal
+did its job: roll and pitch now read at R2 0.00 (0.97 with `fpv`), while height (R2 0.97) and heading
+(4.9 deg median, MLP) are still there.
+
 Reading:
 
-- Heading is the easy part (4.8 deg, most episodes under 4 deg). Distance is harder: the drone gets within
-  18 cm on the way on average but ends at 35 cm, so it still wanders near the goal.
-- Several goals face a wall from up close (rows 2, 3 and 5 of the montage): the goal image is mostly
-  checker, which pins heading but says little about distance along the wall. That is a likely cause of
-  error, but not the only one: of the first six episodes, two that face the open room also end 38-41 cm
-  away. Not yet measured across all 20.
-- Next levers: goals that see the room rather than a wall, a longer horizon or a final-step weight, and
-  more data for the predictor (the arm's planning stopped improving after 10 min of data; the drone's has
-  not been measured).
+- With the gimbal, 17 of 20 episodes end within 20 cm and 15 deg, against 6. The median final distance is
+  8.8 cm and heading 2.4 deg. Without the two misses below, the mean final distance is 8.5 cm, against 4.1 cm
+  closest on the way. A little wander remains, but nothing like 18 -> 35 cm.
+- The two clear misses (episodes 1 and 11, ending 57-60 cm away) are goals whose view is almost all checker
+  wall: episode 1 in the montage (row 2), and episode 11 by geometry (0.64 m from a wall, 1.62 m up). A
+  repeating pattern looks the same after a sideways move of one checker period, so the goal image itself is
+  ambiguous. Episode 1 ends at energy 0.249, as low as the successes: the planner found a matching view, 60
+  cm along the wall. Episode 11 ends at 0.44, so it is not explained as fully.
+- The diagnosis transfers to the arm: its planner worked with plain CEM because the arm settles before
+  every frame, so a frame depends only on joint positions. The gimbal gives the drone the same property.
+- For a real drone: a gimbal, or de-rotating each frame by the IMU attitude before encoding.
 
 ## Suggested next steps for the drone world-model plan
 

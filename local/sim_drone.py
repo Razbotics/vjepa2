@@ -226,7 +226,20 @@ class SimDrone:
         return f
 
     def render(self, camera="fpv"):
-        self.renderer.update_scene(self.data, camera=camera)
+        """BGR image. "fpv_level" is the onboard camera on an ideal gimbal: same mount, lens and 15 deg
+        downward pitch as "fpv", but it keeps only the drone's heading, so roll and pitch don't move the view."""
+        if camera != "fpv_level":
+            self.renderer.update_scene(self.data, camera=camera)
+            return self.renderer.render()[..., ::-1]
+        self.renderer.update_scene(self.data, camera="fpv")
+        yaw = np.radians(self.rpy_deg[2])
+        c, s, t = np.cos(yaw), np.sin(yaw), np.radians(FPV_TILT)
+        Ryaw = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+        pos = self.pos + Ryaw @ np.array([0.02, 0.0, 0.012])
+        for cam in self.renderer.scene.camera:
+            cam.pos[:] = pos
+            cam.forward[:] = Ryaw @ np.array([np.cos(t), 0.0, -np.sin(t)])
+            cam.up[:] = Ryaw @ np.array([np.sin(t), 0.0, np.cos(t)])
         return self.renderer.render()[..., ::-1]
 
 

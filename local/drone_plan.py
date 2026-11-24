@@ -120,10 +120,11 @@ def main():
     drone = SimDrone(width=ma["width"], height=ma["height"], fps=ma["fps"])
     assert drone.substeps == meta["substeps_per_frame"], "frame timing differs from the training run"
     lim = ROOM - ma["wall_margin"]
+    camera = meta["camera"]["name"]  # fly with the camera the predictor was trained on
     z_lo, z_hi = ma["z_min"], ma["z_max"]
 
     def see():
-        frame = drone.render("fpv")
+        frame = drone.render(camera)
         return encode_frames([frame], encoder, mean, std, zmu, zsd, device), frame
 
     def state_now(ref):
@@ -154,7 +155,8 @@ def main():
 
     out = args.out or os.path.join("local", "runs", f"drone_plan_{args.policy}_" + time.strftime("%Y%m%d_%H%M%S"))
     os.makedirs(out, exist_ok=True)
-    print(f"policy={args.policy}  predictor={args.model}  step={k / drone.fps:.2f} s  steps={args.steps}  "
+    print(f"policy={args.policy}  predictor={args.model}  camera={camera}  step={k / drone.fps:.2f} s  "
+          f"steps={args.steps}  "
           f"start {args.min_dist}-{args.max_dist} m and up to {args.max_turn:.0f} deg from the goal")
     results, rows, plan_ms = [], [], []
     for ep in range(args.episodes):
@@ -212,7 +214,7 @@ def main():
                 for _ in range(drone.substeps):
                     drone.tick(r, v_ref, yr)
                 if writer is not None:
-                    writer.write(np.hstack([label, drone.render("fpv"), drone.render("track")]))
+                    writer.write(np.hstack([label, drone.render(camera), drone.render("track")]))
             ref, yaw_ref = new_ref, new_yaw
             if drone.touching():
                 print(f"  ep {ep}: touched something at step {step}")

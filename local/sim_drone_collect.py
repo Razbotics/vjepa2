@@ -18,7 +18,7 @@ something or tilts past 60 deg, it is put back in the air at a safe hover and `s
 training pairs can be kept from straddling the reset.
 
 Output (default local/data/sim_drone/<timestamp>):
-  frames/000000.jpg ...   onboard camera, one per sample
+  frames/000000.jpg ...   onboard camera (--camera), one per sample
   log.npz                 t_frame, pos, quat (w x y z), rpy_deg, vel (world), rate (body), ref_pos, ref_vel,
                           ref_acc, ref_yaw, target (x y z yaw), motors, target_id, segment
   meta.json               room, camera, controller and motion settings, "sim": true
@@ -75,6 +75,8 @@ def main():
     ap.add_argument("--height", type=int, default=360)
     ap.add_argument("--fps", type=float, default=30.0)
     ap.add_argument("--jpeg-quality", type=int, default=92)
+    ap.add_argument("--camera", default="fpv", choices=["fpv", "fpv_level"],
+                    help="fpv: fixed to the body; fpv_level: on an ideal gimbal that keeps only heading")
     args = ap.parse_args()
 
     out = args.out or os.path.join("local", "data", "sim_drone", time.strftime("%Y%m%d_%H%M%S"))
@@ -134,7 +136,7 @@ def main():
             drone.hover_at(start[:3], start[3])
             target, dur, dwell, _ = new_leg(start)
             t_leg, target_id = 0.0, target_id + 1
-        cv2.imwrite(os.path.join(out, "frames", f"{i:06d}.jpg"), drone.render("fpv"),
+        cv2.imwrite(os.path.join(out, "frames", f"{i:06d}.jpg"), drone.render(args.camera),
                     [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality])
         for k, v in (("t_frame", (i + 1) / args.fps), ("pos", drone.pos), ("quat", drone.data.qpos[3:7].copy()),
                      ("rpy_deg", drone.rpy_deg), ("vel", drone.vel), ("rate", drone.rate), ("ref_pos", ref.copy()),
@@ -154,7 +156,7 @@ def main():
         "sim": True,
         "robot": "crazyflie_2",
         "model": CF2_DIR,
-        "camera": {"name": "fpv", "tilt_down_deg": FPV_TILT, "fovy_deg": 70, "width": args.width,
+        "camera": {"name": args.camera, "tilt_down_deg": FPV_TILT, "fovy_deg": 70, "width": args.width,
                    "height": args.height},
         "room_half_width_m": ROOM,
         "pillars": PILLARS, "boxes": BOXES,
