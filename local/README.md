@@ -713,6 +713,41 @@ on the same last 12 minutes (4,000 test starts):
   mostly the features' own limit on the wrist roll and gripper, not the predictor.
 - More data also fixed the probe: wrist_flex R2 0.64 -> 1.00, gripper 0.70 -> 0.91.
 
+### Closed-loop image-goal reaching in simulation
+
+`sim_plan.py` runs the real-arm planning loop on the simulated arm: the CEM planner and the frame encoder
+are shared with `arm_plan.py` (`cem_plan`, `encode_frames`; the extracted CEM gives bit-identical actions
+to the old inline version). Each episode puts the arm at a random goal pose in the training box (all six
+joints, +/-20 deg) and records the goal image, then at a start pose at least 6 deg away on average, and
+gives it 20 steps of 0.5 s. Episodes depend only on `--seed` (100, unseen in training), so every row below
+faces the same 20 episodes.
+
+```bash
+~/projects/lerobot/.venv/bin/python -m local.sim_plan local/data/sim_arm/hour_seed1 [--pred train600s] [--policy random]
+```
+
+| Policy | Joint error, mean | Gripper tip | Ends within 2 cm | Got closer |
+|---|---|---|---|---|
+| Planning, predictor on 48 min | 11.1 -> **3.2 deg** | 9.7 -> **2.1 cm** | 11 of 20 | 20 of 20 |
+| Planning, predictor on 10 min | 11.1 -> 3.3 deg | 9.7 -> 2.0 cm | 10 of 20 | 20 of 20 |
+| Planning, predictor on 2 min | 11.1 -> 4.6 deg | 9.7 -> 2.5 cm | 6 of 20 | 20 of 20 |
+| Random actions, same size | 11.1 -> 12.7 deg | 9.7 -> 13.2 cm | 0 of 20 | 7 of 20 |
+
+Per joint, 48-min predictor (deg): shoulder_pan 9.8 -> 0.6, shoulder_lift 12.3 -> 1.4, elbow 14.6 -> 2.2,
+wrist_flex 9.3 -> 1.9, wrist_roll 14.7 -> 9.7, gripper 5.9 -> 3.2. Planning takes about 90 ms per step.
+
+- Image-goal planning works with all six joints: every episode gets closer, and the gripper tip goes from
+  9.7 cm to about 2 cm within 3 s (6 steps), then holds. Random actions of the same size drift away.
+- Shoulder, elbow and wrist flex converge to 0.6 to 2 deg. Wrist roll barely improves and the gripper
+  halves: same pattern as on the real arm, and the same cause. Those joints change the image little, so
+  the feature distance hardly rewards getting them right (the probe's floor on them is the highest too).
+- Predictor quality matters, up to a point: the 2-minute predictor still plans (it is worse than copy
+  at one-step prediction, yet ranking actions only needs their order right) but ends 40% further away;
+  10 and 48 minutes plan equally well, although 48 predicts better. Planning, at this horizon and goal
+  distance, is limited by the energy (feature L1 to the goal image), not the predictor.
+- Next levers, each cheap to test here: a goal energy that weights the gripper region (a finer token grid
+  or a crop), a longer horizon, and goals outside the training box.
+
 - Sim images are not real images: features and predictors trained here will not transfer to the C270
   view as they are. Use the simulator to develop methods and answer scaling questions, then confirm on the
   real arm.

@@ -124,6 +124,52 @@ class Arm:
             self.bus.disconnect(disable_torque=False)
 
 
+def encode_frames(frames, encoder, mean, std, zmu, zsd, device, jpeg_quality=92):
+    """BGR frames -> standardized 4x4 feature grids [n, 16, D], matching arm_encode.py's preprocessing.
+
+    The training frames went through a jpg on disk; round-trip the live ones the same way so inputs match.
+    """
+    frames = [cv2.imdecode(cv2.imencode(".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])[1], 1) for f in frames]
+    x = torch.from_numpy(np.stack(frames)).to(device).flip(-1).permute(0, 3, 1, 2).float().div_(255.0)
+    h, w = x.shape[-2:]
+    s = min(h, w)
+    x = x[..., (h - s) // 2 : (h - s) // 2 + s, (w - s) // 2 : (w - s) // 2 + s]
+    x = F.interpolate(x, size=(256, 256), mode="bilinear", antialias=True, align_corners=False)
+    x = ((x - mean) / std).unsqueeze(2).repeat(1, 1, 2, 1, 1)
+    with torch.inference_mode(), torch.autocast(device.type, dtype=torch.bfloat16):
+        z = encoder(x).float()
+    b, t, d = z.shape
+    side = int(round(t**0.5))
+    g = F.adaptive_avg_pool2d(z.transpose(1, 2).reshape(b, d, side, side), 4).flatten(2).transpose(1, 2)
+    return (g - zmu) / zsd
+
+
+def cem_plan(model, z, q, z_goal, lo, hi, qmu, qsd, gen, horizon=2, samples=256, iters=3, elites=24, sigma=3.0,
+             max_step=5.0):
+    """CEM over joint-delta sequences [H, A] in degrees, scored by L1 of the predicted features to the goal.
+
+    z, z_goal [1, 16, D] standardized; q current joint angles (deg); lo, hi box tensors (deg).
+    Returns (first action in deg as numpy, lowest energy).
+    """
+    device = z.device
+    q_t = torch.tensor(q, device=device, dtype=torch.float32)
+    mean = torch.zeros(horizon, len(q), device=device)
+    std = torch.full_like(mean, sigma)
+    with torch.inference_mode():
+        for _ in range(iters):
+            a = mean + std * torch.randn((samples,) + mean.shape, device=device, generator=gen)
+            a = a.clamp(-max_step, max_step)
+            zc, qc = z.expand(samples, -1, -1), q_t.expand(samples, -1)
+            for h in range(horizon):
+                a[:, h] = torch.minimum(torch.maximum(qc + a[:, h], lo), hi) - qc  # stay in the box
+                zc = model(zc, (qc - qmu) / qsd, a[:, h] / qsd)
+                qc = qc + a[:, h]
+            energy = (zc - z_goal).abs().mean(dim=(1, 2))
+            best = a[energy.topk(elites, largest=False).indices]
+            mean, std = best.mean(0), best.std(0).clamp_min(0.2)
+    return mean[0].cpu().numpy(), float(energy.min())
+
+
 class Eyes:
     """Camera -> standardized 4x4 feature grid, matching arm_encode.py's preprocessing."""
 
@@ -153,20 +199,8 @@ class Eyes:
             time.sleep(0.003)
         frames = self.cam.latest(n, 1)[1]
         self.last = frames[-1]
-        # The training frames went through a quality-92 jpg on disk; do the same so the inputs match.
-        frames = [cv2.imdecode(cv2.imencode(".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, 92])[1], 1) for f in frames]
-        x = torch.from_numpy(np.stack(frames)).to(self.device).flip(-1).permute(0, 3, 1, 2).float().div_(255.0)
-        h, w = x.shape[-2:]
-        s = min(h, w)
-        x = x[..., (h - s) // 2 : (h - s) // 2 + s, (w - s) // 2 : (w - s) // 2 + s]
-        x = F.interpolate(x, size=(256, 256), mode="bilinear", antialias=True, align_corners=False)
-        x = ((x - self.mean) / self.std).unsqueeze(2).repeat(1, 1, 2, 1, 1)
-        with torch.inference_mode(), torch.autocast(self.device.type, dtype=torch.bfloat16):
-            z = self.encoder(x).float()
-        b, t, d = z.shape
-        side = int(round(t**0.5))
-        g = F.adaptive_avg_pool2d(z.transpose(1, 2).reshape(b, d, side, side), 4).flatten(2).transpose(1, 2)
-        return ((g - self.zmu) / self.zsd).mean(0, keepdim=True)
+        g = encode_frames(frames, self.encoder, self.mean, self.std, self.zmu, self.zsd, self.device)
+        return g.mean(0, keepdim=True)
 
 
 def scene_check(run, model, joints, eyes, q_now):
@@ -259,23 +293,8 @@ def main():
         hi_t = torch.tensor(hi_deg, device=device, dtype=torch.float32)
 
         def plan(z, q, z_goal):
-            """CEM over joint-delta sequences [H, A] in degrees. Returns the first action (deg)."""
-            q_t = torch.tensor(q, device=device, dtype=torch.float32)
-            mean = torch.zeros(args.horizon, len(joints), device=device)
-            std = torch.full_like(mean, args.sigma)
-            with torch.inference_mode():
-                for _ in range(args.iters):
-                    a = mean + std * torch.randn((args.samples,) + mean.shape, device=device, generator=gen)
-                    a = a.clamp(-args.max_step, args.max_step)
-                    zc, qc = z.expand(args.samples, -1, -1), q_t.expand(args.samples, -1)
-                    for h in range(args.horizon):
-                        a[:, h] = torch.minimum(torch.maximum(qc + a[:, h], lo_t), hi_t) - qc  # stay in the box
-                        zc = model(zc, (qc - qmu) / qsd, a[:, h] / qsd)
-                        qc = qc + a[:, h]
-                    energy = (zc - z_goal).abs().mean(dim=(1, 2))
-                    best = a[energy.topk(args.elites, largest=False).indices]
-                    mean, std = best.mean(0), best.std(0).clamp_min(0.2)
-            return mean[0].cpu().numpy(), float(energy.min())
+            return cem_plan(model, z, q, z_goal, lo_t, hi_t, qmu, qsd, gen, args.horizon, args.samples, args.iters,
+                            args.elites, args.sigma, args.max_step)
 
         print(f"\npolicy={args.policy}  joints={joints}  step={dt:.2f} s  horizon={args.horizon}")
         for ep in range(args.episodes):
